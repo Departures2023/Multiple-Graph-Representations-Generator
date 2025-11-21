@@ -1,15 +1,48 @@
 import cv2
 import numpy as np
 import json
+from PIL import Image as PILImage
 
 
 class ImprovedGraphDetector:
-    def __init__(self, image_path=None):
-        self.image = cv2.imread(image_path) if image_path else None
+    def __init__(self, image_input=None):
+        """
+        Initialize detector with an image.
+        
+        Args:
+            image_input: Can be:
+                - str: File path to image
+                - PIL.Image: PIL Image object
+                - np.ndarray: OpenCV image array (BGR format)
+                - None: Empty detector (use set_image() later)
+        """
+        self.image = None
         self.nodes = []
         self.edges = []
+        
+        if image_input is None:
+            return
+        
+        if isinstance(image_input, str):
+            # File path
+            self.image = cv2.imread(image_input)
+        elif isinstance(image_input, PILImage.Image):
+            # PIL Image - convert to OpenCV format (BGR)
+            img_array = np.array(image_input)
+            if len(img_array.shape) == 3:
+                # Convert RGB to BGR for OpenCV
+                self.image = img_array[:, :, ::-1].copy()
+            else:
+                # Grayscale
+                self.image = img_array
+        elif isinstance(image_input, np.ndarray):
+            # Already OpenCV format
+            self.image = image_input.copy()
+        else:
+            raise TypeError(f"Unsupported image type: {type(image_input)}")
     
     def set_image(self, image):
+        """Set image from OpenCV array"""
         self.image = image.copy()
     
     def detect_nodes(self, min_radius=20, max_radius=100):
@@ -780,6 +813,46 @@ class ImprovedGraphDetector:
                     queue.append((neighbor, path + [neighbor], new_path_len))
         
         return None
+    
+    def detect_and_get_edges(self, min_radius=20, max_radius=100, detect_arrows=True):
+        """
+        Detect nodes and edges, then return edges as list of (source, target) tuples.
+        
+        This is a convenience method for getting edges directly without needing
+        to call detect_nodes() and detect_edges() separately.
+        
+        Args:
+            min_radius: Minimum node radius for detection
+            max_radius: Maximum node radius for detection
+            detect_arrows: Whether to detect arrow directions
+            
+        Returns:
+            List of (source, target) tuples, or None if detection fails
+        """
+        if self.image is None:
+            return None
+        
+        try:
+            # Detect nodes
+            nodes = self.detect_nodes(min_radius=min_radius, max_radius=max_radius)
+            if not nodes:
+                return None
+            
+            # Detect edges
+            edges = self.detect_edges(detect_arrows=detect_arrows)
+            if not edges:
+                return None
+            
+            # Extract edge list as (source, target) tuples
+            edge_list = []
+            for edge in edges:
+                source_id = int(edge['source'])
+                target_id = int(edge['target'])
+                edge_list.append((source_id, target_id))
+            
+            return edge_list
+        except Exception:
+            return None
     
     def get_graph_representation(self):
         """Get V and E representation"""

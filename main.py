@@ -12,9 +12,12 @@ if __name__ == "__main__":
     print(g)
 
     # Graph 2: Test image -> description + title
-    graph_2_description = None
-    graph_2_title = "C4 Graph"
-    graph_2_image = None
+    import os
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    sample_image_path = os.path.join(script_dir, "image_to_description", "sample_complex.png")
+    graph_2_image = Image.open(sample_image_path) if os.path.exists(sample_image_path) else None
+    graph_2_description = Graph._image_to_description(graph_2_image) if graph_2_image else None
+    graph_2_title = None
 
     g = Graph(description=graph_2_description, title=graph_2_title, image=graph_2_image)
     print(g)

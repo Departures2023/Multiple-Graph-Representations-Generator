@@ -60,7 +60,30 @@ class Graph:
 
     @staticmethod
     def _image_to_description(image: ImageType) -> Optional[List[Tuple[int, int]]]:
-        raise NotImplementedError
+        """
+        Convert a graph image to a list of edges (description).
+        
+        Uses the ImprovedGraphDetector to detect nodes and edges from the image.
+        Returns a list of (source, target) tuples representing directed edges.
+        
+        Args:
+            image: PIL Image containing a graph diagram
+            
+        Returns:
+            List of (source, target) edge tuples, or None if detection fails
+        """
+        try:
+            from image_to_description.improved_detector import ImprovedGraphDetector
+            
+            # Create detector directly with PIL Image
+            detector = ImprovedGraphDetector(image)
+            
+            # Detect and get edges in one call
+            return detector.detect_and_get_edges(min_radius=20, max_radius=100, detect_arrows=True)
+            
+        except Exception:
+            # If detection fails, return None
+            return None
 
     def __repr__(self) -> str:
         return (
