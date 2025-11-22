@@ -1,147 +1,245 @@
 """
 graph_title.py
 ---------------
-Handles canonical naming and synthetic title generation for small graphs (≤ 20 nodes).
-Integrates with NetworkX; can export graphs to LaTeX (TikZ) or image formats.
+Improved graph naming and title generation for small graphs (≤ 20 nodes).
 """
-import inspect
+
 import networkx as nx
+from typing import Dict, Optional
 
-# Optional: later you can add 'pygraphviz' or 'network2tikz' for visualization/export
-# import pygraphviz as pgv
-# from network2tikz import plot as tikz_plot
-
-
-# ===============================
-# 1. GRAPH TITLE DATABASE
-# ===============================
-
-# auto_discover asks whether it should explore other potential graphs
-def build_title_db(auto_discover=True):
+def build_title_db() -> Dict[str, str]:
     """
-    Build a canonical title database from known named graphs in NetworkX.
-    - Automatically loads graphs from common NetworkX generator modules.
-    - Skips functions that require parameters.
+    Build a comprehensive title database from known named graphs.
+    Uses a curated list of important graphs rather than auto-discovery.
     """    
     title_db = {}
 
-    # Base known graphs you want to guarantee
-    known_graphs = {
-        "Cycle graph C4": nx.cycle_graph(4),
-        "Cycle graph C5": nx.cycle_graph(5),
-        "Complete graph K5": nx.complete_graph(5),
-        "Complete bipartite graph K3,3": nx.complete_bipartite_graph(3, 3),
-        "Paley graph (9)": nx.paley_graph(9),
+    # Helper to add graph to database
+    def add_graph(title: str, G: nx.Graph):
+        if G.number_of_nodes() <= 20:
+            g6 = nx.to_graph6_bytes(G.to_undirected(), header=False).decode().strip()
+            title_db[g6] = title
+
+    # Cycle graphs
+    for n in range(3, 21):
+        add_graph(f"Cycle graph C{n}", nx.cycle_graph(n))
+    
+    # Path graphs
+    for n in range(2, 21):
+        add_graph(f"Path graph P{n}", nx.path_graph(n))
+    
+    # Complete graphs
+    for n in range(2, 21):
+        add_graph(f"Complete graph K{n}", nx.complete_graph(n))
+    
+    # Complete bipartite graphs (common ones)
+    for m in range(1, 8):
+        for n in range(m, 8):
+            if m + n <= 20:
+                add_graph(f"Complete bipartite graph K{m},{n}", 
+                         nx.complete_bipartite_graph(m, n))
+    
+    # Star graphs
+    for n in range(3, 21):
+        add_graph(f"Star graph S{n}", nx.star_graph(n))
+    
+    # Wheel graphs
+    for n in range(4, 21):
+        add_graph(f"Wheel graph W{n}", nx.wheel_graph(n))
+    
+    # Regular graphs and special named graphs
+    special_graphs = {
+        "Petersen graph": nx.petersen_graph(),
+        "Tutte graph": nx.tutte_graph(),
+        "Dodecahedral graph": nx.dodecahedral_graph(),
+        "Icosahedral graph": nx.icosahedral_graph(),
+        "Octahedral graph": nx.octahedral_graph(),
+        "Tetrahedral graph": nx.tetrahedral_graph(),
+        "Cubical graph": nx.cubical_graph(),
+        "Desargues graph": nx.desargues_graph(),
+        "Heawood graph": nx.heawood_graph(),
+        "Pappus graph": nx.pappus_graph(),
+        "Frucht graph": nx.frucht_graph(),
+        "House graph": nx.house_graph(),
+        "House X graph": nx.house_x_graph(),
+        "Bull graph": nx.bull_graph(),
+        "Chvatal graph": nx.chvatal_graph(),
+        "Diamond graph": nx.diamond_graph(),
+        "Krackhardt kite graph": nx.krackhardt_kite_graph(),
+        "Moebius-Kantor graph": nx.moebius_kantor_graph(),
+        "Truncated cube graph": nx.truncated_cube_graph(),
+        "Truncated tetrahedron graph": nx.truncated_tetrahedron_graph(),
     }
-
-    # Always include these
-    for title, G in known_graphs.items():
-        g6 = nx.to_graph6_bytes(G.to_undirected()).decode().strip()
-        title_db[g6] = title
-
-    # Auto-discover other named graphs if requested
-    if auto_discover:
-        generator_modules = [
-            nx.generators.classic,
-            nx.generators.small,
-            nx.generators.social,
-            nx.generators.atlas
-        ]
-
-        for module in generator_modules:
-            for name, func in inspect.getmembers(module, inspect.isfunction):
-                # Only call functions that take 0 arguments (safe)
-                try:
-                    sig = inspect.signature(func)
-                    if all(p.default != inspect.Parameter.empty or p.kind == inspect.Parameter.VAR_KEYWORD
-                           for p in sig.parameters.values()):
-                        # Function has all default args — safe to call
-                        G = func()
-                        if isinstance(G, nx.Graph) and G.number_of_nodes() > 0:
-                            title = name.replace("_", " ").capitalize()
-                            g6 = nx.to_graph6_bytes(G).decode().strip()
-                            title_db[g6] = title
-                except Exception:
-                    # Ignore anything that fails
-                    continue
+    
+    for title, G in special_graphs.items():
+        add_graph(title, G)
+    
+    # Grid graphs
+    for m in range(2, 11):
+        for n in range(m, 11):
+            if m * n <= 20:
+                add_graph(f"Grid graph {m}×{n}", nx.grid_2d_graph(m, n))
+    
+    # Hypercube graphs
+    for n in range(1, 5):  # Q1 through Q4 (2, 4, 8, 16 nodes)
+        add_graph(f"Hypercube graph Q{n}", nx.hypercube_graph(n))
+    
+    # Paley graphs (primes only)
+    for p in [5, 9, 13, 17]:
+        try:
+            add_graph(f"Paley graph ({p})", nx.paley_graph(p))
+        except:
+            pass
+    
+    # Ladder graphs
+    for n in range(2, 11):
+        if 2 * n <= 20:
+            add_graph(f"Ladder graph L{n}", nx.ladder_graph(n))
+    
+    # Circular ladder graphs
+    for n in range(3, 11):
+        if 2 * n <= 20:
+            add_graph(f"Circular ladder graph CL{n}", nx.circular_ladder_graph(n))
+    
+    # Barbell graphs
+    for m in range(2, 8):
+        for n in range(0, 5):
+            if 2 * m + n <= 20:
+                add_graph(f"Barbell graph B{m},{n}", nx.barbell_graph(m, n))
 
     return title_db
 
 
-
+# Build database once at module load
 TITLE_DB = build_title_db()
 
 
-# ===============================
-# 2. TITLE GENERATOR
-# ===============================
-
-def generate_title(G: nx.Graph) -> str:
+def generate_title(G: nx.Graph, check_isomorphism: bool = True) -> str:
     """
-    Generate a canonical or synthetic title for a given NetworkX graph object.
-    If a known isomorphic graph is found, return its canonical title.
-    Otherwise, return a descriptive synthetic title.
+    Generate a title for a NetworkX graph.
+    
+    Args:
+        G: Input graph
+        check_isomorphism: If True, perform slower isomorphism check if no direct match
+    
+    Returns:
+        Graph title (either canonical name or synthetic description)
     """
     # Ensure graph size constraint
     if G.number_of_nodes() > 20:
         raise ValueError("Graph exceeds 20-node limit.")
-
-    # Compute canonical encoding
-    g6 = nx.to_graph6_bytes(G).decode().strip()
-
-    # Check canonical match
+    
+    if G.number_of_nodes() == 0:
+        return "Empty graph"
+    
+    if G.number_of_nodes() == 1:
+        return "Trivial graph (1 node)"
+    
+    # Convert to undirected and compute canonical encoding
+    G_undirected = G.to_undirected() if G.is_directed() else G
+    g6 = nx.to_graph6_bytes(G_undirected, header=False).decode().strip()
+    
+    # Check for direct match
     if g6 in TITLE_DB:
         return TITLE_DB[g6]
+    
+    # Optional: Check for isomorphic matches (slower)
+    if check_isomorphism and G.number_of_nodes() <= 10:
+        for known_g6, title in TITLE_DB.items():
+            try:
+                known_graph = nx.from_graph6_bytes((known_g6 + '\n').encode())
+                if nx.is_isomorphic(G_undirected, known_graph):
+                    return title
+            except:
+                continue
+    
+    # Generate synthetic descriptor
+    return _generate_synthetic_title(G_undirected)
 
-    # Check for isomorphic matches (in case label differences)
-    for known_g6, title in TITLE_DB.items():
-        known_graph = nx.from_graph6_bytes(known_g6.encode())
-        if nx.is_isomorphic(G, known_graph):
-            return title
 
-    # Fallback synthetic descriptor
+def _generate_synthetic_title(G: nx.Graph) -> str:
+    """Generate a concise synthetic title for an unknown graph."""
     n = G.number_of_nodes()
     m = G.number_of_edges()
-    degrees = [d for _, d in G.degree()]
-    regular = all(d == degrees[0] for d in degrees)
-    planar = nx.check_planarity(G)[0]
-    bipartite = nx.is_bipartite(G)
+    
+    # Check for special structures
+    if m == 0:
+        return f"Empty graph ({n} nodes)"
+    
+    if m == n * (n - 1) // 2:
+        return f"Complete graph K{n}"
+    
+    degrees = sorted([d for _, d in G.degree()])
+    min_deg, max_deg = degrees[0], degrees[-1]
+    
+    # Check regularity
+    if min_deg == max_deg:
+        if min_deg == 2 and nx.is_connected(G):
+            return f"Cycle graph C{n}"
+        return f"{min_deg}-regular graph ({n} nodes, {m} edges)"
+    
+    # Check bipartiteness
+    if nx.is_bipartite(G):
+        return f"Bipartite graph ({n} nodes, {m} edges)"
+    
+    # Check tree
+    if nx.is_tree(G):
+        return f"Tree ({n} nodes)"
+    
+    # Check connectivity
+    connected = "connected" if nx.is_connected(G) else "disconnected"
+    
+    # Default descriptor
+    return f"{connected.capitalize()} graph ({n} nodes, {m} edges, deg {min_deg}-{max_deg})"
 
-    desc = []
-    desc.append("Planar" if planar else "Nonplanar")
-    if regular:
-        desc.append(f"{degrees[0]}-regular")
-    if bipartite:
-        desc.append("bipartite")
-    desc.append(f"{n}-node, {m}-edge graph")
 
-    return " ".join(desc)
-
-
-# ===============================
-# 3. (OPTIONAL) EXPORTERS
-# ===============================
-
-def export_graph_latex(G: nx.Graph, filepath: str = "graph.tex"):
+def lookup_graph(name: str) -> Optional[nx.Graph]:
     """
-    Export a NetworkX graph to LaTeX/TikZ code using network2tikz (optional).
+    Reverse lookup: given a graph name, return the corresponding graph.
+    
+    Args:
+        name: Graph name (case-insensitive, partial matching supported)
+    
+    Returns:
+        NetworkX graph or None if not found
     """
-    try:
-        from network2tikz import plot
-        plot(G, filename=filepath)
-        print(f"Graph exported to {filepath}")
-    except ImportError:
-        print("network2tikz not installed. Run `pip install network2tikz` to enable LaTeX export.")
+    name_lower = name.lower()
+    
+    # Try exact match first
+    for g6, title in TITLE_DB.items():
+        if title.lower() == name_lower:
+            return nx.from_graph6_bytes((g6 + '\n').encode())
+    
+    # Try partial match
+    matches = []
+    for g6, title in TITLE_DB.items():
+        if name_lower in title.lower():
+            matches.append((title, g6))
+    
+    if len(matches) == 1:
+        return nx.from_graph6_bytes((matches[0][1] + '\n').encode())
+    elif len(matches) > 1:
+        print(f"Multiple matches found: {[m[0] for m in matches]}")
+        return None
+    
+    return None
 
 
-def export_graph_image(G: nx.Graph, filepath: str = "graph.png", layout_prog: str = "dot"):
-    """
-    Export a NetworkX graph to an image using Graphviz layout.
-    """
-    try:
-        import pygraphviz as pgv
-        A = nx.nx_agraph.to_agraph(G)
-        A.draw(filepath, prog=layout_prog)
-        print(f"Graph image saved to {filepath}")
-    except ImportError:
-        print("pygraphviz not installed. Run `pip install pygraphviz` to enable image export.")
+# Example usage and testing
+if __name__ == "__main__":
+    # Test with known graphs
+    print("Testing known graphs:")
+    print(generate_title(nx.petersen_graph()))
+    print(generate_title(nx.cycle_graph(5)))
+    print(generate_title(nx.complete_graph(4)))
+    
+    # Test with custom graph
+    print("\nTesting custom graph:")
+    G = nx.Graph([(0, 1), (1, 2), (2, 3), (3, 0)])
+    print(generate_title(G))
+    
+    # Test reverse lookup
+    print("\nTesting reverse lookup:")
+    G = lookup_graph("petersen")
+    if G:
+        print(f"Found: {generate_title(G)}, {G.number_of_nodes()} nodes")
