@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import List, Optional, Tuple
 
+from description_to_image import generate_graph_image
 from graph_title import generate_title, lookup_graph
 
 from PIL import Image
@@ -50,7 +51,7 @@ class Graph:
 
     @staticmethod
     def _description_to_image(description: List[Tuple[int, int]]) -> ImageType:
-        raise NotImplementedError
+        return generate_graph_image(description)
 
     @staticmethod
     def _description_to_title(description: List[Tuple[int, int]]) -> str:
