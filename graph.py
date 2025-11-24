@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import List, Optional, Tuple
 
+from graph_title import generate_title, lookup_graph
+
 from PIL import Image
 
 ImageType = Image.Image
@@ -56,7 +58,13 @@ class Graph:
 
     @staticmethod
     def _title_to_description(title: str) -> Optional[List[Tuple[int, int]]]:
-        raise NotImplementedError
+        """
+        Reverse lookup from canonical title → edge list.
+        """
+        G = lookup_graph(title)
+        if G is None:
+            return None
+        return list(G.edges())
 
     @staticmethod
     def _image_to_description(image: ImageType) -> Optional[List[Tuple[int, int]]]:
