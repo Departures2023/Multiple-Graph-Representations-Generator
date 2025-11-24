@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from typing import List, Optional, Tuple
 
-from description_to_image import generate_graph_image
-from graph_title import generate_title, lookup_graph
-
+import networkx as nx
 from PIL import Image
+
+from description_to_image import generate_graph_image
+from src.graph_title import generate_title, lookup_graph
 
 ImageType = Image.Image
 
@@ -42,7 +43,39 @@ class Graph:
         Iteratively fill missing representations using whatever is available.
         """
 
-        raise NotImplementedError
+        while True:
+            made_progress = False
+
+            # Try to derive description if missing
+            if self.description is None:
+                if self.title:
+                    desc = self._title_to_description(self.title)
+                    if desc:
+                        self.description = desc
+                        made_progress = True
+                if self.description is None and self.image is not None:
+                    desc = self._image_to_description(self.image)
+                    if desc:
+                        self.description = desc
+                        made_progress = True
+
+            # If we have description, derive title/image as needed
+            if self.description is not None:
+                if self.title is None:
+                    try:
+                        self.title = self._description_to_title(self.description)
+                        made_progress = True
+                    except Exception:
+                        pass
+                if self.image is None:
+                    try:
+                        self.image = self._description_to_image(self.description)
+                        made_progress = True
+                    except Exception:
+                        pass
+
+            if not made_progress:
+                break
 
     # -----------------------------------------------------------------------
     # CONVERSION METHODS
@@ -55,7 +88,9 @@ class Graph:
 
     @staticmethod
     def _description_to_title(description: List[Tuple[int, int]]) -> str:
-        raise NotImplementedError
+        G = nx.Graph()
+        G.add_edges_from(description)
+        return generate_title(G)
 
     @staticmethod
     def _title_to_description(title: str) -> Optional[List[Tuple[int, int]]]:

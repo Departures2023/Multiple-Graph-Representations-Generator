@@ -4,7 +4,7 @@ from graph import Graph
 
 if __name__ == "__main__":
     # Graph 1: Test description -> image + title
-    graph_1_description = [(1, 2), (2, 3), (3, 1)]
+    graph_1_description = [(1, 2), (2, 3), (3, 1), (3, 4), (4, 5), (5, 3), (5, 6), (6, 4), (6, 7), (7, 5), (7, 8), (8, 6)]
     graph_1_title = None
     graph_1_image = None
 
