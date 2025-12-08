@@ -2,11 +2,12 @@ import streamlit as st
 import networkx as nx
 import matplotlib.pyplot as plt
 import re
-import random
+import io
+from PIL import Image
 
-# Import backend logic from your uploaded file
-#
-from src.graph_title import generate_title, TITLE_DB
+# Import backend logic
+from graph import Graph
+from src.graph_title import TITLE_DB
 
 # ==========================================
 # 1. HELPER FUNCTIONS (CONVERSION LOGIC)
@@ -15,91 +16,124 @@ from src.graph_title import generate_title, TITLE_DB
 def parse_description_to_graph(text):
     """
     Parses text input in the format: V = {1, 2, 3}, E = {(1, 2), (2, 3)}
-    Returns a NetworkX graph.
+    Returns a Graph object.
     """
-    G = nx.Graph()
     try:
-        # Extract Nodes (V)
-        v_match = re.search(r"V\s*=\s*\{([0-9,\s]+)\}", text)
-        if v_match:
-            # Split by comma, filter empty strings, convert to int
-            nodes = [int(n.strip()) for n in v_match.group(1).split(',') if n.strip()]
-            G.add_nodes_from(nodes)
-
         # Extract Edges (E)
         e_match = re.search(r"E\s*=\s*\{(.*?)\}", text)
         if e_match:
             edges_str = e_match.group(1)
             # Regex to find tuples like (1, 2) or (1,2)
             edges = re.findall(r"\((\d+),\s*(\d+)\)", edges_str)
-            for u, v in edges:
-                G.add_edge(int(u), int(v))
-        
-        if G.number_of_nodes() == 0:
-            return None, "No nodes found. Ensure format matches: V = {1, 2}"
-
-        return G, None
+            edge_list = [(int(u), int(v)) for u, v in edges]
+            
+            if not edge_list:
+                return None, "No edges found. Ensure format matches: E = {(1, 2), (2, 3)}"
+            
+            # Create Graph object with description (edge list)
+            g = Graph(description=edge_list)
+            return g, None
+        else:
+            return None, "Could not parse edge list. Ensure format matches: E = {(1, 2), (2, 3)}"
+            
     except Exception as e:
         return None, f"Parsing Error: {str(e)}"
 
 def model_title_to_graph(title_query):
     """
-    Converts a text title (e.g., "Cycle graph C5") into a NetworkX graph.
-    1. Checks TITLE_DB for exact matches.
-    2. Uses Regex for dynamic generation of common graphs.
+    Converts a text title (e.g., "Cycle graph C5") into a Graph object.
+    Uses the Graph class to handle title-to-description conversion.
     """
-    clean_query = title_query.strip().lower()
+    try:
+        # Try to create a Graph object from the title
+        g = Graph(title=title_query)
+        
+        if g.description:
+            return g, f"Successfully created graph from title: {title_query}"
+        else:
+            return None, "Could not interpret title. Title may not be in database."
+            
+    except Exception as e:
+        # If Graph class can't handle it, try fallback regex approach
+        clean_query = title_query.strip().lower()
+        
+        # Cycle Graph
+        match_c = re.search(r"(?:cycle|c)[^0-9]*(\d+)", clean_query)
+        if match_c:
+            n = int(match_c.group(1))
+            nx_graph = nx.cycle_graph(n)
+            edge_list = list(nx_graph.edges())
+            g = Graph(description=edge_list)
+            return g, f"Generated Cycle Graph C{n}"
 
-    # --- STRATEGY 1: Reverse Lookup in TITLE_DB ---
-    for g6_str, db_title in TITLE_DB.items():
-        if clean_query == db_title.lower():
-            G = nx.from_graph6_bytes(g6_str.encode())
-            return G, f"Found in database: {db_title}"
+        # Complete Graph
+        match_k = re.search(r"(?:complete|k)[^0-9]*(\d+)", clean_query)
+        if match_k:
+            n = int(match_k.group(1))
+            nx_graph = nx.complete_graph(n)
+            edge_list = list(nx_graph.edges())
+            g = Graph(description=edge_list)
+            return g, f"Generated Complete Graph K{n}"
 
-    # --- STRATEGY 2: Dynamic Generation (Regex) ---
-    # Cycle Graph
-    match_c = re.search(r"(?:cycle|c)[^0-9]*(\d+)", clean_query)
-    if match_c:
-        n = int(match_c.group(1))
-        return nx.cycle_graph(n), f"Generated Cycle Graph C{n}"
+        # Path Graph
+        match_p = re.search(r"(?:path|p)[^0-9]*(\d+)", clean_query)
+        if match_p:
+            n = int(match_p.group(1))
+            nx_graph = nx.path_graph(n)
+            edge_list = list(nx_graph.edges())
+            g = Graph(description=edge_list)
+            return g, f"Generated Path Graph P{n}"
 
-    # Complete Graph
-    match_k = re.search(r"(?:complete|k)[^0-9]*(\d+)", clean_query)
-    if match_k:
-        n = int(match_k.group(1))
-        return nx.complete_graph(n), f"Generated Complete Graph K{n}"
+        # Star Graph
+        match_s = re.search(r"(?:star|s)[^0-9]*(\d+)", clean_query)
+        if match_s:
+            n = int(match_s.group(1))
+            nx_graph = nx.star_graph(n)
+            edge_list = list(nx_graph.edges())
+            g = Graph(description=edge_list)
+            return g, f"Generated Star Graph with {n} leaves"
 
-    # Path Graph
-    match_p = re.search(r"(?:path|p)[^0-9]*(\d+)", clean_query)
-    if match_p:
-        n = int(match_p.group(1))
-        return nx.path_graph(n), f"Generated Path Graph P{n}"
-
-    # Star Graph
-    match_s = re.search(r"(?:star|s)[^0-9]*(\d+)", clean_query)
-    if match_s:
-        n = int(match_s.group(1))
-        return nx.star_graph(n), f"Generated Star Graph with {n} leaves"
-
-    return None, "Could not interpret title. Try 'Cycle graph C5', 'K4', or 'Star 6'."
+        return None, f"Could not interpret title: {str(e)}"
 
 def model_image_to_data(uploaded_image):
     """
-    PLACEHOLDER: Connect your AI Model (CaMeRa-style) here.
-    Currently returns a mock result.
+    Converts an uploaded image to a Graph object using image detection.
     """
-    # Mock simulation
-    n = random.randint(4, 8)
-    G = nx.cycle_graph(n)
-    return G, f"Simulated AI prediction: Detected Cycle Graph C{n}"
+    try:
+        # Convert uploaded file to PIL Image
+        image = Image.open(uploaded_image)
+        
+        # Create Graph object from image
+        g = Graph(image=image)
+        
+        if g.description:
+            return g, f"Successfully detected graph from image"
+        else:
+            return None, "Could not detect graph structure from image"
+            
+    except Exception as e:
+        return None, f"Image processing error: {str(e)}"
 
-def render_graph(G):
-    """Standard visualization using Matplotlib"""
-    fig, ax = plt.subplots(figsize=(5, 4))
-    pos = nx.kamada_kawai_layout(G) 
-    nx.draw(G, pos, ax=ax, with_labels=True, node_color='#d1c4e9', edge_color='#5e35b1', 
-            node_size=500, font_weight='bold')
-    return fig
+def render_graph(graph_obj):
+    """Standard visualization using Matplotlib from Graph object"""
+    # If the Graph object has an image, we could display it directly
+    # But for consistency, we'll render from the description
+    if graph_obj.description:
+        G = nx.Graph()
+        G.add_edges_from(graph_obj.description)
+        
+        fig, ax = plt.subplots(figsize=(5, 4))
+        pos = nx.kamada_kawai_layout(G) 
+        nx.draw(G, pos, ax=ax, with_labels=True, node_color='#d1c4e9', edge_color='#5e35b1', 
+                node_size=500, font_weight='bold')
+        return fig
+    elif graph_obj.image:
+        # If we only have image, display it
+        fig, ax = plt.subplots(figsize=(5, 4))
+        ax.imshow(graph_obj.image)
+        ax.axis('off')
+        return fig
+    return None
 
 # ==========================================
 # 2. MAIN APPLICATION (UI)
@@ -166,13 +200,13 @@ def main():
             st.subheader("✨ Output")
             
             if run_btn:
-                results_G = None
+                results_graph = None
                 status_msg = ""
 
                 # PRIORITY 1: Description -> Image & Title
                 if use_desc and not use_img and val_desc:
                     st.info("Mode: Description ➔ Image & Title")
-                    results_G, err = parse_description_to_graph(val_desc)
+                    results_graph, err = parse_description_to_graph(val_desc)
                     if err:
                         st.error(err)
                     else:
@@ -181,40 +215,45 @@ def main():
                 # PRIORITY 2: Image -> Description & Title
                 elif use_img and val_img:
                     st.info("Mode: Image ➔ Description & Title")
-                    results_G, note = model_image_to_data(val_img)
+                    results_graph, note = model_image_to_data(val_img)
                     status_msg = note
 
                 # PRIORITY 3: Title -> Image & Description
                 elif use_title and val_title:
                     st.info(f"Mode: Title ('{val_title}') ➔ Graph")
-                    results_G, note = model_title_to_graph(val_title)
+                    results_graph, note = model_title_to_graph(val_title)
                     status_msg = note
                 
                 # --- RENDER RESULTS ---
-                if results_G:
-                    # 1. Generate Title (using your backend)
-                    try:
-                        # If user provided a title, we might show it or regenerate a canonical one
-                        generated_title = generate_title(results_G)
-                        st.success(f"**Title:** {generated_title}")
-                    except Exception as e:
-                        st.warning(f"Could not generate canonical title: {e}")
+                if results_graph:
+                    # 1. Display Title (from Graph object)
+                    if results_graph.title:
+                        st.success(f"**Title:** {results_graph.title}")
+                    else:
+                        st.warning("Could not generate canonical title")
 
                     # 2. Generate Description (V/E Sets)
-                    nodes = sorted(list(results_G.nodes()))
-                    edges = sorted(list(results_G.edges()))
-                    # Format as set notation
-                    desc_text = f"V = {set(nodes)}\nE = {set(edges)}"
-                    st.text_area("Generated Description", value=desc_text, height=100)
+                    if results_graph.description:
+                        # Get all unique nodes from edges
+                        nodes = set()
+                        for u, v in results_graph.description:
+                            nodes.add(u)
+                            nodes.add(v)
+                        nodes = sorted(list(nodes))
+                        edges = sorted(results_graph.description)
+                        # Format as set notation
+                        desc_text = f"V = {set(nodes)}\nE = {set(edges)}"
+                        st.text_area("Generated Description", value=desc_text, height=100)
 
                     # 3. Generate Image
-                    fig = render_graph(results_G)
-                    st.pyplot(fig)
+                    fig = render_graph(results_graph)
+                    if fig:
+                        st.pyplot(fig)
                     
                     if status_msg:
                         st.caption(f"Status: {status_msg}")
                 
-                elif not results_G and not status_msg:
+                elif not results_graph and not status_msg:
                      st.warning("Please select an input mode and provide valid data.")
             else:
                 # Empty state
