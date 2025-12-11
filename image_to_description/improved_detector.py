@@ -3,9 +3,22 @@ import numpy as np
 import json
 from PIL import Image as PILImage
 
+# OCR support - try multiple libraries
+try:
+    import pytesseract
+    PYTESSERACT_AVAILABLE = True
+except ImportError:
+    PYTESSERACT_AVAILABLE = False
+
+try:
+    import easyocr
+    EASYOCR_AVAILABLE = True
+except ImportError:
+    EASYOCR_AVAILABLE = False
+
 
 class ImprovedGraphDetector:
-    def __init__(self, image_input=None):
+    def __init__(self, image_input=None, use_ocr=True):
         """
         Initialize detector with an image.
         
@@ -15,10 +28,29 @@ class ImprovedGraphDetector:
                 - PIL.Image: PIL Image object
                 - np.ndarray: OpenCV image array (BGR format)
                 - None: Empty detector (use set_image() later)
+            use_ocr: Whether to use OCR for text detection (default: True)
         """
         self.image = None
         self.nodes = []
         self.edges = []
+        self.use_ocr = use_ocr
+        self.ocr_reader = None
+        
+        # Initialize OCR if available and requested
+        if use_ocr and EASYOCR_AVAILABLE:
+            try:
+                # Check if GPU is available
+                import torch
+                gpu_available = torch.cuda.is_available()
+                self.ocr_reader = easyocr.Reader(['en'], gpu=gpu_available)
+                if gpu_available:
+                    print(f"✓ Using GPU for OCR (CUDA device: {torch.cuda.get_device_name(0)})")
+            except:
+                # Fallback to CPU if GPU initialization fails
+                try:
+                    self.ocr_reader = easyocr.Reader(['en'], gpu=False)
+                except:
+                    self.ocr_reader = None
         
         if image_input is None:
             return
@@ -28,13 +60,19 @@ class ImprovedGraphDetector:
             self.image = cv2.imread(image_input)
         elif isinstance(image_input, PILImage.Image):
             # PIL Image - convert to OpenCV format (BGR)
+            # Convert to RGB first to handle all formats (RGBA, P, etc.)
+            if image_input.mode != 'RGB':
+                image_input = image_input.convert('RGB')
+            
             img_array = np.array(image_input)
-            if len(img_array.shape) == 3:
+            if len(img_array.shape) == 3 and img_array.shape[2] == 3:
                 # Convert RGB to BGR for OpenCV
-                self.image = img_array[:, :, ::-1].copy()
+                self.image = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+            elif len(img_array.shape) == 2:
+                # Grayscale - convert to BGR
+                self.image = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
             else:
-                # Grayscale
-                self.image = img_array
+                raise ValueError(f"Unsupported image shape: {img_array.shape}")
         elif isinstance(image_input, np.ndarray):
             # Already OpenCV format
             self.image = image_input.copy()
@@ -42,36 +80,175 @@ class ImprovedGraphDetector:
             raise TypeError(f"Unsupported image type: {type(image_input)}")
     
     def set_image(self, image):
-        """Set image from OpenCV array"""
-        self.image = image.copy()
+        """
+        Set image from various sources.
+        
+        Args:
+            image: Can be np.ndarray (OpenCV BGR), PIL.Image, or file path
+        """
+        if isinstance(image, str):
+            # File path
+            self.image = cv2.imread(image)
+        elif isinstance(image, PILImage.Image):
+            # PIL Image - convert to OpenCV format (BGR)
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+            img_array = np.array(image)
+            if len(img_array.shape) == 3 and img_array.shape[2] == 3:
+                self.image = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+            elif len(img_array.shape) == 2:
+                self.image = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
+            else:
+                raise ValueError(f"Unsupported image shape: {img_array.shape}")
+        elif isinstance(image, np.ndarray):
+            # Already OpenCV format - ensure it's BGR
+            if len(image.shape) == 2:
+                # Grayscale - convert to BGR
+                self.image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+            elif len(image.shape) == 3 and image.shape[2] == 3:
+                # Assume BGR format
+                self.image = image.copy()
+            elif len(image.shape) == 3 and image.shape[2] == 4:
+                # BGRA - remove alpha channel
+                self.image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+            else:
+                raise ValueError(f"Unsupported image shape: {image.shape}")
+        else:
+            raise TypeError(f"Unsupported image type: {type(image)}")
+    
+    def _scan_entire_image_for_text(self):
+        """Scan the entire image for text at multiple scales and return detected text with positions"""
+        text_locations = []
+        seen_positions = set()
+        
+        if not self.use_ocr or self.ocr_reader is None:
+            return text_locations
+        
+        try:
+            # CRITICAL: Try multiple scales - different text is visible at different scales!
+            # This is needed because small hand-drawn text has varying quality
+            for scale in [2, 3, 4, 5]:
+                upscaled = cv2.resize(self.image, 
+                                    (self.image.shape[1]*scale, self.image.shape[0]*scale), 
+                                    interpolation=cv2.INTER_CUBIC)
+                
+                # Use EasyOCR on upscaled image with minimal thresholds
+                results = self.ocr_reader.readtext(upscaled, detail=1, 
+                                                  paragraph=False,
+                                                  min_size=1,
+                                                  width_ths=0.1,
+                                                  height_ths=0.1)
+                
+                for bbox, text, conf in results:
+                    if conf > 0.5:  # Decent confidence threshold
+                        # Get center of text bounding box and scale back to original coordinates
+                        bbox_array = np.array(bbox)
+                        center_x = int(np.mean(bbox_array[:, 0]) / scale)
+                        center_y = int(np.mean(bbox_array[:, 1]) / scale)
+                        
+                        # Create position key (rounded to avoid duplicates)
+                        pos_key = (round(center_x / 5) * 5, round(center_y / 5) * 5)
+                        
+                        cleaned_text = ''.join(c for c in text if c.isalnum())
+                        if cleaned_text and len(cleaned_text) <= 3 and pos_key not in seen_positions:
+                            # Lowercase all letters for consistency (OCR may detect 'C' as uppercase)
+                            cleaned_text = cleaned_text.lower()
+                            
+                            text_locations.append({
+                                'text': cleaned_text,
+                                'position': (center_x, center_y),
+                                'confidence': conf,
+                                'scale': scale
+                            })
+                            seen_positions.add(pos_key)
+        except:
+            pass
+        
+        return text_locations
     
     def detect_nodes(self, min_radius=20, max_radius=100):
+        if self.image is None or self.image.size == 0:
+            return []
+        
+        # First, scan entire image for all text and cache it
+        all_text = self._scan_entire_image_for_text()
+        self._all_text_cache = all_text  # Cache for use in edge detection
+        
         gray = cv2.cvtColor(self.image, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (9, 9), 2)
+        
+        # Enhanced preprocessing for hand-drawn graphs
+        # Apply bilateral filter to preserve edges while reducing noise
+        filtered = cv2.bilateralFilter(gray, 9, 75, 75)
+        blurred = cv2.GaussianBlur(filtered, (9, 9), 2)
         
         self.nodes = []
         
-        # Detect circles using Hough Circle Transform
-        circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, dp=1, minDist=50,
-                                   param1=100, param2=30, 
-                                   minRadius=min_radius, maxRadius=max_radius)
+        # Try multiple parameter sets for better detection of hand-drawn circles
+        param_sets = [
+            # (param1, param2) - lower param2 is more lenient
+            (100, 30),  # Standard detection
+            (80, 25),   # More lenient
+            (60, 20),   # Very lenient for hand-drawn
+        ]
         
-        if circles is not None:
-            circles = np.uint16(np.around(circles))
+        circles_found = None
+        for param1, param2 in param_sets:
+            circles = cv2.HoughCircles(
+                blurred, cv2.HOUGH_GRADIENT, 
+                dp=1, minDist=50,
+                param1=param1, param2=param2, 
+                minRadius=min_radius, maxRadius=max_radius
+            )
+            if circles is not None:
+                circles_found = circles
+                break
+        
+        if circles_found is not None:
+            circles = np.uint16(np.around(circles_found))
             for i, (x, y, r) in enumerate(circles[0, :]):
-                # Extract node region
+                # Extract node region with safe integer conversion
+                x, y, r = int(x), int(y), int(r)
                 x1, y1 = max(0, x-r-10), max(0, y-r-10)
                 x2, y2 = min(self.image.shape[1], x+r+10), min(self.image.shape[0], y+r+10)
+                
+                # Ensure valid region
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                    
                 node_region = self.image[y1:y2, x1:x2]
                 
-                # Get dominant color
+                # Get dominant color with proper mask dimensions
                 mask = np.zeros((y2-y1, x2-x1), dtype=np.uint8)
-                cv2.circle(mask, (x-x1, y-y1), r, 255, -1)
-                color = cv2.mean(node_region, mask=mask)[:3]
-                color = tuple(map(int, color))
+                center_in_mask = (x-x1, y-y1)
                 
-                # Try to extract text using simple method
-                text = self._extract_text_simple(node_region)
+                # Ensure center is within mask bounds and mask dimensions match node_region
+                if (0 <= center_in_mask[0] < mask.shape[1] and 
+                    0 <= center_in_mask[1] < mask.shape[0] and
+                    mask.shape[0] == node_region.shape[0] and 
+                    mask.shape[1] == node_region.shape[1]):
+                    # Ensure radius doesn't exceed mask bounds
+                    safe_radius = min(r, min(mask.shape[0], mask.shape[1]) // 2)
+                    cv2.circle(mask, center_in_mask, safe_radius, 255, -1)
+                    color = cv2.mean(node_region, mask=mask)[:3]
+                    color = tuple(map(int, color))
+                else:
+                    color = (128, 128, 128)  # Default gray
+                
+                # Try to find text near this node from full-image scan
+                text = ''
+                if all_text:
+                    # Look for text within radius of this node
+                    search_radius = r * 1.5  # Look within 1.5x node radius
+                    for text_item in all_text:
+                        tx, ty = text_item['position']
+                        dist = np.sqrt((tx - x)**2 + (ty - y)**2)
+                        if dist < search_radius:
+                            text = text_item['text']
+                            break
+                
+                # Fallback to region-based extraction if no text found
+                if not text:
+                    text = self._extract_text_simple(node_region)
                 
                 node = {
                     'id': i,
@@ -115,13 +292,37 @@ class ImprovedGraphDetector:
                             break
                 
                 if not overlaps:
+                    # Ensure valid region bounds
+                    if x < 0 or y < 0 or x+w > self.image.shape[1] or y+h > self.image.shape[0]:
+                        continue
+                    
                     node_region = self.image[y:y+h, x:x+w]
-                    mask = np.zeros_like(gray)
-                    cv2.drawContours(mask, [contour], -1, 255, -1)
-                    color = cv2.mean(self.image, mask=mask[y:y+h, x:x+w])[:3]
+                    
+                    # Create mask with correct dimensions (matching the region)
+                    mask_region = np.zeros((h, w), dtype=np.uint8)
+                    # Adjust contour coordinates to region-local coordinates
+                    contour_shifted = contour - [x, y]
+                    cv2.drawContours(mask_region, [contour_shifted], -1, 255, -1)
+                    
+                    # Get color from region with matching mask
+                    color = cv2.mean(node_region, mask=mask_region)[:3]
                     color = tuple(map(int, color))
                     
-                    text = self._extract_text_simple(node_region)
+                    # Try to find text near this node from full-image scan
+                    text = ''
+                    if all_text:
+                        # Look for text within the rectangle bounds
+                        search_radius = max(w, h) * 0.8
+                        for text_item in all_text:
+                            tx, ty = text_item['position']
+                            dist = np.sqrt((tx - center[0])**2 + (ty - center[1])**2)
+                            if dist < search_radius:
+                                text = text_item['text']
+                                break
+                    
+                    # Fallback to region-based extraction if no text found
+                    if not text:
+                        text = self._extract_text_simple(node_region)
                     
                     node = {
                         'id': len(self.nodes),
@@ -136,26 +337,194 @@ class ImprovedGraphDetector:
         return self.nodes
     
     def _extract_text_simple(self, region):
-        """Simple text extraction - looks for dark/light patterns"""
+        """Extract text using OCR with aggressive preprocessing"""
         try:
+            # Check if region is valid
+            if region is None or region.size == 0 or len(region.shape) < 2:
+                return ""
+            
+            # Ensure region has proper dimensions
+            if region.shape[0] < 5 or region.shape[1] < 5:
+                return ""
+            
+            # If OCR is disabled, return empty
+            if not self.use_ocr:
+                return ""
+            
+            # Preprocessing for better OCR
             gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
-            _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             
-            # Find text contours (small regions)
-            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            # Resize small regions for better OCR (scale up small text)
+            if gray.shape[0] < 50 or gray.shape[1] < 50:
+                scale = 3
+                gray = cv2.resize(gray, (gray.shape[1]*scale, gray.shape[0]*scale), 
+                                interpolation=cv2.INTER_CUBIC)
             
-            text_chars = []
-            for cnt in contours:
-                area = cv2.contourArea(cnt)
-                if 20 < area < 1000:  # Likely text size
-                    x, y, w, h = cv2.boundingRect(cnt)
-                    if 0.3 < w/h < 3:  # Aspect ratio of text
-                        text_chars.append(x)  # Just track that text exists
+            # Try multiple preprocessing strategies
+            preprocessing_methods = []
             
-            # For now, return empty - OCR would go here
+            # Method 1: Simple threshold
+            _, thresh1 = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY)
+            preprocessing_methods.append(("simple", thresh1))
+            
+            # Method 2: Otsu threshold
+            _, thresh2 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            preprocessing_methods.append(("otsu", thresh2))
+            
+            # Method 3: Inverted Otsu (for dark text on light background)
+            _, thresh3 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            preprocessing_methods.append(("inv_otsu", thresh3))
+            
+            # Method 4: Adaptive threshold
+            adaptive_size = min(11, (min(gray.shape) // 3) | 1)
+            if adaptive_size >= 3:
+                thresh4 = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                               cv2.THRESH_BINARY, adaptive_size, 2)
+                preprocessing_methods.append(("adaptive", thresh4))
+            
+            # Method 5: Enhanced contrast
+            enhanced = cv2.equalizeHist(gray)
+            _, thresh5 = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            preprocessing_methods.append(("enhanced", thresh5))
+            
+            # Method 6: Very aggressive dark text extraction
+            _, thresh6 = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+            preprocessing_methods.append(("dark_text", thresh6))
+            
+            # Method 7: Lower threshold for faint text
+            _, thresh7 = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
+            preprocessing_methods.append(("faint_text", thresh7))
+            
+            # Try EasyOCR with all preprocessing methods
+            if self.ocr_reader is not None:
+                for method_name, preprocessed in preprocessing_methods:
+                    try:
+                        # Try with very low threshold to catch everything
+                        results = self.ocr_reader.readtext(preprocessed, detail=1, 
+                                                          paragraph=False,
+                                                          min_size=3,
+                                                          width_ths=0.5,
+                                                          height_ths=0.5)
+                        if results:
+                            # Try all results, not just best
+                            for bbox, text, conf in results:
+                                if conf > 0.05:  # Very low confidence threshold
+                                    text = text.strip()
+                                    # Filter to alphanumeric only
+                                    text = ''.join(c for c in text if c.isalnum())
+                                    if text:
+                                        return text[:10]
+                    except:
+                        continue
+            
+            # Try Tesseract as fallback with multiple PSM modes
+            if PYTESSERACT_AVAILABLE:
+                psm_modes = [
+                    ('10', 'Single character'),
+                    ('8', 'Single word'),
+                    ('7', 'Single line'),
+                    ('6', 'Uniform block'),
+                    ('13', 'Raw line')
+                ]
+                
+                for method_name, preprocessed in preprocessing_methods:
+                    for psm, desc in psm_modes:
+                        try:
+                            config = f'--psm {psm} --oem 3 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+                            text = pytesseract.image_to_string(preprocessed, config=config).strip()
+                            
+                            # Clean up
+                            text = ''.join(c for c in text if c.isalnum())
+                            if text:
+                                return text[:10]
+                        except:
+                            continue
+            
             return ""
         except:
             return ""
+    
+    def _extract_edge_weight(self, edge_region):
+        """Extract weight/label from edge region using OCR with aggressive preprocessing"""
+        try:
+            if edge_region is None or edge_region.size == 0:
+                return None
+            
+            if not self.use_ocr:
+                return None
+            
+            # Preprocess
+            gray = cv2.cvtColor(edge_region, cv2.COLOR_BGR2GRAY)
+            
+            # Resize small regions
+            if gray.shape[0] < 40 or gray.shape[1] < 40:
+                scale = 2
+                gray = cv2.resize(gray, (gray.shape[1]*scale, gray.shape[0]*scale), 
+                                interpolation=cv2.INTER_CUBIC)
+            
+            # Multiple preprocessing attempts
+            preprocessing_methods = []
+            
+            _, thresh1 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            preprocessing_methods.append(("otsu", thresh1))
+            
+            _, thresh2 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            preprocessing_methods.append(("inv_otsu", thresh2))
+            
+            enhanced = cv2.equalizeHist(gray)
+            _, thresh3 = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            preprocessing_methods.append(("enhanced", thresh3))
+            
+            _, thresh4 = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+            preprocessing_methods.append(("dark_text", thresh4))
+            
+            # Try EasyOCR with multiple preprocessing
+            if self.ocr_reader is not None:
+                for method_name, preprocessed in preprocessing_methods:
+                    try:
+                        results = self.ocr_reader.readtext(preprocessed, detail=1, 
+                                                          allowlist='0123456789.',
+                                                          paragraph=False,
+                                                          min_size=3,
+                                                          width_ths=0.5,
+                                                          height_ths=0.5)
+                        if results:
+                            # Try all results
+                            for bbox, text, conf in results:
+                                if conf > 0.05:
+                                    text = text.strip()
+                                    # Try to parse as number
+                                    try:
+                                        weight = float(text)
+                                        return weight
+                                    except:
+                                        # Return as string if not numeric
+                                        if text:
+                                            return text
+                    except:
+                        continue
+            
+            # Try Tesseract with multiple modes
+            if PYTESSERACT_AVAILABLE:
+                for method_name, preprocessed in preprocessing_methods:
+                    for psm in ['10', '7', '8', '6', '13']:
+                        try:
+                            config = f'--psm {psm} --oem 3 -c tessedit_char_whitelist=0123456789.'
+                            text = pytesseract.image_to_string(preprocessed, config=config).strip()
+                            
+                            if text:
+                                try:
+                                    weight = float(text)
+                                    return weight
+                                except:
+                                    if text:
+                                        return text
+                        except:
+                            continue
+            
+            return None
+        except:
+            return None
     
     def detect_edges(self, detect_arrows=True, edge_min_pixels=5, node_proximity=20, debug=False):
         """Detect edges by removing nodes and finding remaining lines
@@ -168,6 +537,21 @@ class ImprovedGraphDetector:
         """
         if not self.nodes:
             return []
+        
+        # Get all numbers from full image for edge weights
+        all_numbers = []
+        if hasattr(self, '_all_text_cache'):
+            for item in self._all_text_cache:
+                # Check if it's a number (for weights)
+                try:
+                    weight = float(item['text'])
+                    all_numbers.append({
+                        'weight': weight,
+                        'position': item['position'],
+                        'used': False
+                    })
+                except:
+                    pass
         
         gray = cv2.cvtColor(self.image, cv2.COLOR_BGR2GRAY)
         
@@ -242,19 +626,26 @@ class ImprovedGraphDetector:
                     gray = cv2.cvtColor(self.image, cv2.COLOR_BGR2GRAY)
                     _, binary = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY_INV)
                     
+                    # Find nodes by ID
+                    node_a = next((n for n in self.nodes if n['id'] == node_a_id), None)
+                    node_b = next((n for n in self.nodes if n['id'] == node_b_id), None)
+                    
+                    if not node_a or not node_b:
+                        continue
+                    
                     # Check for arrowhead at each node
-                    dx_ab = self.nodes[node_b_id]['center'][0] - self.nodes[node_a_id]['center'][0]
-                    dy_ab = self.nodes[node_b_id]['center'][1] - self.nodes[node_a_id]['center'][1]
+                    dx_ab = node_b['center'][0] - node_a['center'][0]
+                    dy_ab = node_b['center'][1] - node_a['center'][1]
                     dist_ab = np.sqrt(dx_ab**2 + dy_ab**2)
                     dx_ab /= dist_ab if dist_ab > 0 else 1
                     dy_ab /= dist_ab if dist_ab > 0 else 1
                     
                     arrow_at_a = self._check_arrowhead_near_node(
-                        binary, self.nodes[node_a_id]['center'], self.nodes[node_b_id]['center'],
-                        self.nodes[node_a_id].get('radius', 40))
+                        binary, node_a['center'], node_b['center'],
+                        node_a.get('radius', 40))
                     arrow_at_b = self._check_arrowhead_near_node(
-                        binary, self.nodes[node_b_id]['center'], self.nodes[node_a_id]['center'],
-                        self.nodes[node_b_id].get('radius', 40))
+                        binary, node_b['center'], node_a['center'],
+                        node_b.get('radius', 40))
                     
                     if debug:
                         print(f"  Edge {node_a_id}-{node_b_id}: arrow_at_{node_a_id}={arrow_at_a}, arrow_at_{node_b_id}={arrow_at_b}")
@@ -287,6 +678,38 @@ class ImprovedGraphDetector:
                     source_id, target_id = (node_a_id, node_b_id) if node_a_id < node_b_id else (node_b_id, node_a_id)
                     is_directed = False
                 
+                # Try to extract edge weight from nearby numbers
+                weight = None
+                if all_numbers and edge_pixels is not None and len(edge_pixels) > 10:
+                    # Get midpoint of edge
+                    xs = [p[0][0] for p in edge_pixels]
+                    ys = [p[0][1] for p in edge_pixels]
+                    if xs and ys:
+                        mid_x = (min(xs) + max(xs)) // 2
+                        mid_y = (min(ys) + max(ys)) // 2
+                        
+                        # Find closest unused number to this edge
+                        min_dist = float('inf')
+                        closest_num = None
+                        closest_idx = -1
+                        
+                        for idx, num_item in enumerate(all_numbers):
+                            if num_item['used']:
+                                continue
+                            
+                            nx, ny = num_item['position']
+                            dist = np.sqrt((nx - mid_x)**2 + (ny - mid_y)**2)
+                            
+                            # Check if number is reasonably close to edge
+                            if dist < 50 and dist < min_dist:  # Within 50 pixels
+                                min_dist = dist
+                                closest_num = num_item
+                                closest_idx = idx
+                        
+                        if closest_num is not None:
+                            weight = closest_num['weight']
+                            all_numbers[closest_idx]['used'] = True
+                
                 edge = {
                     'id': edge_id,
                     'source': source_id,
@@ -294,7 +717,8 @@ class ImprovedGraphDetector:
                     'directed': is_directed,
                     'arrow_at_target': is_directed,
                     'color': (0, 0, 0),
-                    'thickness': 2
+                    'thickness': 2,
+                    'weight': weight
                 }
                 self.edges.append(edge)
                 edge_id += 1
@@ -305,6 +729,39 @@ class ImprovedGraphDetector:
                     edge_mask, connected_nodes, detect_arrows)
                 
                 for edge_info in found_edges:
+                    # Try to find weight for this edge
+                    weight = None
+                    if all_numbers:
+                        # Get the two nodes involved
+                        src_node = next((n for n in self.nodes if n['id'] == edge_info['source']), None)
+                        tgt_node = next((n for n in self.nodes if n['id'] == edge_info['target']), None)
+                        
+                        if src_node and tgt_node:
+                            # Midpoint between nodes
+                            mid_x = (src_node['center'][0] + tgt_node['center'][0]) // 2
+                            mid_y = (src_node['center'][1] + tgt_node['center'][1]) // 2
+                            
+                            # Find closest unused number
+                            min_dist = float('inf')
+                            closest_num = None
+                            closest_idx = -1
+                            
+                            for idx, num_item in enumerate(all_numbers):
+                                if num_item['used']:
+                                    continue
+                                
+                                nx, ny = num_item['position']
+                                dist = np.sqrt((nx - mid_x)**2 + (ny - mid_y)**2)
+                                
+                                if dist < 50 and dist < min_dist:
+                                    min_dist = dist
+                                    closest_num = num_item
+                                    closest_idx = idx
+                            
+                            if closest_num is not None:
+                                weight = closest_num['weight']
+                                all_numbers[closest_idx]['used'] = True
+                    
                     edge = {
                         'id': edge_id,
                         'source': edge_info['source'],
@@ -312,12 +769,47 @@ class ImprovedGraphDetector:
                         'directed': edge_info['directed'],
                         'arrow_at_target': edge_info.get('arrow_at_target', False),
                         'color': (0, 0, 0),
-                        'thickness': 2
+                        'thickness': 2,
+                        'weight': weight if weight is not None else edge_info.get('weight', None)
                     }
                     self.edges.append(edge)
                     edge_id += 1
         
+        # Deduplicate edges (important for matplotlib-rendered graphs)
+        self.edges = self._deduplicate_edges(self.edges)
+        
         return self.edges
+    
+    def _deduplicate_edges(self, edges):
+        """Remove duplicate edges, keeping the one with the best weight detection"""
+        if not edges:
+            return edges
+        
+        # Group edges by exact (source, target) pair - directional
+        edge_dict = {}
+        for edge in edges:
+            src = edge['source']
+            tgt = edge['target']
+            
+            # Use directional key (src, tgt) - don't normalize
+            # This preserves a→b and b→a as separate edges
+            key = (src, tgt)
+            
+            # Keep edge with weight if available, or first occurrence
+            if key not in edge_dict:
+                edge_dict[key] = edge
+            elif edge.get('weight') is not None and edge_dict[key].get('weight') is None:
+                # Replace with weighted version
+                edge_dict[key] = edge
+        
+        # Return unique edges
+        unique_edges = list(edge_dict.values())
+        
+        # Reassign IDs
+        for i, edge in enumerate(unique_edges):
+            edge['id'] = i
+        
+        return unique_edges
     
     def _detect_arrow_direction(self, edge_mask, source_node, target_node, debug=False):
         """Detect if edge has arrow and which direction by looking for arrowhead"""
@@ -694,9 +1186,12 @@ class ImprovedGraphDetector:
         # Get node positions and radii
         node_info = []
         for node_id in connected_nodes:
-            node = self.nodes[node_id]
+            # Find node by ID (not by index)
+            node = next((n for n in self.nodes if n['id'] == node_id), None)
+            if node is None:
+                continue
             center = node['center']
-            radius = node.get('radius', max(node['bbox'][2], node['bbox'][3]) // 2)
+            radius = node.get('radius', max(node['bbox'][2], node['bbox'][3]) // 2 if 'bbox' in node else 30)
             # Find the closest edge pixel to this node (entry point)
             closest_pixel = None
             min_dist = float('inf')
@@ -739,8 +1234,11 @@ class ImprovedGraphDetector:
                     # Determine direction
                     arrow_direction = None
                     if detect_arrows:
-                        arrow_direction = self._detect_arrow_direction(
-                            edge_mask, self.nodes[node1['id']], self.nodes[node2['id']])
+                        # Find nodes by ID
+                        n1 = next((n for n in self.nodes if n['id'] == node1['id']), None)
+                        n2 = next((n for n in self.nodes if n['id'] == node2['id']), None)
+                        if n1 and n2:
+                            arrow_direction = self._detect_arrow_direction(edge_mask, n1, n2)
                     
                     source_id = node1['id']
                     target_id = node2['id']
@@ -854,8 +1352,8 @@ class ImprovedGraphDetector:
         except Exception:
             return None
     
-    def get_graph_representation(self):
-        """Get V and E representation"""
+    def get_graph_representation(self, include_weights=True):
+        """Get V and E representation with optional weights"""
         vertices = set()
         node_names = {}
         
@@ -865,22 +1363,44 @@ class ImprovedGraphDetector:
             node_names[node['id']] = name
         
         edges = []
+        weighted_edges = []
+        has_weights = False
+        
         for edge in self.edges:
             source_name = node_names.get(edge['source'], str(edge['source']))
             target_name = node_names.get(edge['target'], str(edge['target']))
+            weight = edge.get('weight', None)
+            
+            if weight is not None:
+                has_weights = True
             
             if edge['directed']:
                 edges.append((source_name, target_name))
+                if weight is not None:
+                    weighted_edges.append((source_name, target_name, weight))
             else:
                 edge_pair = tuple(sorted([source_name, target_name]))
                 if edge_pair not in edges:
                     edges.append(edge_pair)
+                    if weight is not None:
+                        weighted_edges.append((source_name, target_name, weight))
         
         v_str = "V = {" + ", ".join(sorted(vertices)) + "}"
-        e_str = "E = {"
-        if edges:
-            e_str += ", ".join([f"({s},{t})" for s, t in edges])
-        e_str += "}"
+        
+        # Show weighted edges if weights are present and requested
+        if include_weights and has_weights and weighted_edges:
+            e_str = "E = {"
+            edge_strs = []
+            for edge_data in weighted_edges:
+                if len(edge_data) == 3:
+                    s, t, w = edge_data
+                    edge_strs.append(f"({s},{t},{w})")
+            e_str += ", ".join(edge_strs) + "}"
+        else:
+            e_str = "E = {"
+            if edges:
+                e_str += ", ".join([f"({s},{t})" for s, t in edges])
+            e_str += "}"
         
         return vertices, edges, f"{v_str}\n{e_str}"
     
@@ -890,8 +1410,12 @@ class ImprovedGraphDetector:
         
         # Draw edges
         for edge in self.edges:
-            src_node = self.nodes[edge['source']]
-            tgt_node = self.nodes[edge['target']]
+            # Find nodes by ID
+            src_node = next((n for n in self.nodes if n['id'] == edge['source']), None)
+            tgt_node = next((n for n in self.nodes if n['id'] == edge['target']), None)
+            
+            if not src_node or not tgt_node:
+                continue
             
             cv2.line(result, src_node['center'], tgt_node['center'], (0, 255, 0), 2)
             

@@ -14,27 +14,61 @@ class RealtimeGraphDetector:
         self.last_representation = "No graph detected yet"
         
     def process_frame(self, frame, detect_arrows=True, min_radius=30, max_radius=60, 
-                      edge_min_pixels=3, node_proximity=25):
-        """Process a frame and detect graph"""
-        self.detector.set_image(frame)
+                      edge_min_pixels=3, node_proximity=25, debug=False):
+        """
+        Process a frame and detect graph using ImprovedGraphDetector.
         
-        # Detect nodes and edges
-        nodes = self.detector.detect_nodes(min_radius=min_radius, max_radius=max_radius)
-        edges = self.detector.detect_edges(detect_arrows=detect_arrows, 
-                                          edge_min_pixels=edge_min_pixels,
-                                          node_proximity=node_proximity)
-        
-        # Get representation
-        if nodes:
-            _, _, representation = self.detector.get_graph_representation()
-            self.last_representation = representation
-        else:
-            self.last_representation = "No graph detected"
-        
-        # Visualize with representation overlay
-        result = self.detector.visualize(show_representation=True)
-        
-        return result, nodes, edges
+        Args:
+            frame: Image frame (OpenCV BGR format, PIL Image, or file path)
+            detect_arrows: Whether to detect directed edges
+            min_radius: Minimum node radius in pixels
+            max_radius: Maximum node radius in pixels
+            edge_min_pixels: Minimum pixels for valid edge component
+            node_proximity: Distance threshold for edge-node connection
+            debug: Whether to print debug information
+            
+        Returns:
+            result: Visualized image with detected graph
+            nodes: List of detected node dictionaries
+            edges: List of detected edge dictionaries
+        """
+        try:
+            # Set image (handles format conversion automatically)
+            self.detector.set_image(frame)
+            
+            # Detect nodes and edges with same parameters as improved_detector
+            nodes = self.detector.detect_nodes(min_radius=min_radius, max_radius=max_radius)
+            edges = self.detector.detect_edges(
+                detect_arrows=detect_arrows, 
+                edge_min_pixels=edge_min_pixels,
+                node_proximity=node_proximity,
+                debug=debug
+            )
+            
+            # Get representation
+            if nodes:
+                _, _, representation = self.detector.get_graph_representation()
+                self.last_representation = representation
+            else:
+                self.last_representation = "No graph detected"
+            
+            # Visualize with representation overlay
+            result = self.detector.visualize(show_representation=True)
+            
+            return result, nodes, edges
+            
+        except Exception as e:
+            if debug:
+                print(f"Detection error: {e}")
+            # Return original frame on error
+            if hasattr(self.detector, 'image') and self.detector.image is not None:
+                return self.detector.image, [], []
+            else:
+                # Try to convert frame to displayable format
+                if isinstance(frame, np.ndarray):
+                    return frame, [], []
+                else:
+                    return np.zeros((480, 640, 3), dtype=np.uint8), [], []
     
     def run_webcam(self):
         """Run real-time detection from webcam"""
@@ -136,8 +170,20 @@ class RealtimeGraphDetector:
         cap.release()
         cv2.destroyAllWindows()
     
-    def run_on_image(self, image_path, detect_arrows=True, min_radius=30, max_radius=60):
-        """Run detection on a static image"""
+    def run_on_image(self, image_path, detect_arrows=True, min_radius=30, max_radius=60,
+                     edge_min_pixels=3, node_proximity=25):
+        """
+        Run detection on a static image file.
+        Uses same parameters as improved_detector for consistency.
+        
+        Args:
+            image_path: Path to image file
+            detect_arrows: Whether to detect directed edges
+            min_radius: Minimum node radius
+            max_radius: Maximum node radius
+            edge_min_pixels: Minimum pixels for edge detection
+            node_proximity: Node proximity threshold
+        """
         image = cv2.imread(image_path)
         if image is None:
             print(f"Error: Could not load image from {image_path}")
@@ -145,9 +191,13 @@ class RealtimeGraphDetector:
         
         print(f"\nProcessing: {image_path}")
         print(f"Arrow detection: {'ON' if detect_arrows else 'OFF'}")
-        print(f"Node size range: {min_radius}-{max_radius}px\n")
+        print(f"Node size range: {min_radius}-{max_radius}px")
+        print(f"Edge sensitivity: min_pixels={edge_min_pixels}, proximity={node_proximity}px\n")
         
-        result, nodes, edges = self.process_frame(image, detect_arrows, min_radius, max_radius)
+        result, nodes, edges = self.process_frame(
+            image, detect_arrows, min_radius, max_radius,
+            edge_min_pixels, node_proximity
+        )
         
         print("="*60)
         print(f"Detection Results")
