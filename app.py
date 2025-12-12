@@ -18,6 +18,13 @@ from automorphisms import (
 )
 from image_to_description.improved_detector import ImprovedGraphDetector
 
+# Check OCR availability
+try:
+    import easyocr
+    OCR_AVAILABLE = True
+except ImportError:
+    OCR_AVAILABLE = False
+
 # ==========================================
 # 1. HELPER FUNCTIONS (CONVERSION LOGIC)
 # ==========================================
@@ -278,7 +285,7 @@ def main_generator_ui():
         st.session_state['gen_status'] = ""
     if 'gen_mode' not in st.session_state:
         st.session_state['gen_mode'] = ""
-    
+
     col_input, col_output = st.columns([1, 1], gap="medium")
 
     # --- LEFT COLUMN: INPUT ---
@@ -333,6 +340,8 @@ def main_generator_ui():
                     col_opt1, col_opt2, col_opt3 = st.columns(3)
                     with col_opt1:
                         use_ocr_gen = st.checkbox("Use OCR", value=True, key="gen_ocr", help="Detect node labels and edge weights")
+                        if use_ocr_gen and not OCR_AVAILABLE:
+                            st.warning("⚠️ OCR not available. Install easyocr for label detection.")
                     with col_opt2:
                         is_weighted_gen = st.checkbox("Weighted", value=True, key="gen_weighted", help="Graph has edge weights")
                     with col_opt3:
@@ -557,19 +566,19 @@ def main_generator_ui():
                     except:
                         nodes_sorted = sorted(list(nodes), key=str)
                     
-                    # Format as set notation
+                        # Format as set notation
                     v_str = "V = {" + ", ".join(str(n) for n in nodes_sorted) + "}"
                     e_str = "E = {" + ", ".join(edges_for_display) + "}"
                     desc_text = f"{v_str}\n{e_str}"
                     st.text_area("Generated Description", value=desc_text, height=100, key="final_desc")
 
-                # 3. Generate Image
-                fig = render_graph(results_graph)
-                if fig:
-                    st.pyplot(fig)
-                
+                    # 3. Generate Image
+                    fig = render_graph(results_graph)
+                    if fig:
+                        st.pyplot(fig)
+                    
                 if status_msg and "Error" not in status_msg:
-                    st.caption(f"Status: {status_msg}")
+                        st.caption(f"Status: {status_msg}")
                 
                 # Add helper message for isomorphism checking
                 st.info("💡 Tip: Use 'From Generator' in Isomorphism Checker tab to compare this graph without re-detecting from the rendered image.")
@@ -596,6 +605,8 @@ def realtime_detection_ui():
         with col_opt1:
             use_ocr = st.checkbox("Use OCR", value=True, key="rt_ocr",
                                  help="Detect node labels and edge weights")
+            if use_ocr and not OCR_AVAILABLE:
+                st.warning("⚠️ OCR not available. Install easyocr for label detection.")
         with col_opt2:
             is_weighted_rt = st.checkbox("Weighted", value=True, key="rt_weighted",
                                         help="Graph has edge weights")
@@ -910,6 +921,8 @@ def isomorphism_checker_ui():
                     st.markdown("**Graph Options:**")
                     g1_ocr = st.checkbox("Use OCR", value=True, key="g1_ocr",
                                         help="Detect node labels and edge weights")
+                    if g1_ocr and not OCR_AVAILABLE:
+                        st.warning("⚠️ OCR not available. Install easyocr for label detection.")
                     g1_weighted = st.checkbox("Weighted", value=True, key="g1_weighted",
                                             help="Graph has edge weights")
                     g1_directed = st.checkbox("Directed", value=False, key="g1_directed",
@@ -1036,6 +1049,8 @@ def isomorphism_checker_ui():
                     st.markdown("**Graph Options:**")
                     g2_ocr = st.checkbox("Use OCR", value=True, key="g2_ocr",
                                         help="Detect node labels and edge weights")
+                    if g2_ocr and not OCR_AVAILABLE:
+                        st.warning("⚠️ OCR not available. Install easyocr for label detection.")
                     g2_weighted = st.checkbox("Weighted", value=True, key="g2_weighted",
                                             help="Graph has edge weights")
                     g2_directed = st.checkbox("Directed", value=False, key="g2_directed",

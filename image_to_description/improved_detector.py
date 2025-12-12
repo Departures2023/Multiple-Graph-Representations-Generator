@@ -42,15 +42,26 @@ class ImprovedGraphDetector:
                 # Check if GPU is available
                 import torch
                 gpu_available = torch.cuda.is_available()
-                self.ocr_reader = easyocr.Reader(['en'], gpu=gpu_available)
+                # Initialize with timeout handling for cloud environments
+                self.ocr_reader = easyocr.Reader(['en'], gpu=gpu_available, verbose=False)
                 if gpu_available:
                     print(f"✓ Using GPU for OCR (CUDA device: {torch.cuda.get_device_name(0)})")
-            except:
+                else:
+                    print("✓ Using CPU for OCR")
+            except Exception as e:
                 # Fallback to CPU if GPU initialization fails
                 try:
-                    self.ocr_reader = easyocr.Reader(['en'], gpu=False)
-                except:
+                    print(f"GPU OCR initialization failed: {e}, trying CPU...")
+                    self.ocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
+                    print("✓ Using CPU for OCR (fallback)")
+                except Exception as e2:
+                    print(f"OCR initialization failed: {e2}. Continuing without OCR.")
                     self.ocr_reader = None
+                    # Disable OCR flag if initialization fails
+                    self.use_ocr = False
+        elif use_ocr and not EASYOCR_AVAILABLE:
+            print("⚠️ OCR requested but EasyOCR not available. Install with: pip install easyocr")
+            self.use_ocr = False
         
         if image_input is None:
             return
