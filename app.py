@@ -108,6 +108,7 @@ def model_image_to_data(uploaded_image, min_radius=20, max_radius=100, detect_ar
     """
     Converts an uploaded image to a Graph object using image detection.
     OCR is enabled by default to detect node labels and edge weights.
+    Includes automatic error recovery for server crashes.
     """
     try:
         # Convert uploaded file to PIL Image
@@ -115,11 +116,60 @@ def model_image_to_data(uploaded_image, min_radius=20, max_radius=100, detect_ar
         
         # Use detector directly for better control
         from image_to_description.improved_detector import ImprovedGraphDetector
-        detector = ImprovedGraphDetector(image, use_ocr=use_ocr)
         
-        # Detect with parameters optimized for various graphs
-        nodes = detector.detect_nodes(min_radius=min_radius, max_radius=max_radius)
-        edges = detector.detect_edges(detect_arrows=detect_arrows, edge_min_pixels=edge_min_pixels, node_proximity=node_proximity)
+        # Try to initialize detector with OCR, fallback to no OCR on error
+        detector = None
+        ocr_failed = False
+        try:
+            detector = ImprovedGraphDetector(image, use_ocr=use_ocr)
+        except Exception as ocr_init_error:
+            # If OCR initialization fails (e.g., server crash), retry without OCR
+            if use_ocr:
+                import streamlit as st
+                st.warning(f"⚠️ OCR initialization failed (server may be overloaded). Retrying without OCR... Error: {str(ocr_init_error)}")
+                try:
+                    detector = ImprovedGraphDetector(image, use_ocr=False)
+                    ocr_failed = True
+                except Exception as retry_error:
+                    return None, f"Detection failed even without OCR. Please try again or refresh the page. Error: {str(retry_error)}"
+            else:
+                return None, f"Detection initialization failed: {str(ocr_init_error)}"
+        
+        if detector is None:
+            return None, "Failed to initialize detector. Please try again."
+        
+        # Detect nodes with error recovery
+        nodes = []
+        try:
+            nodes = detector.detect_nodes(min_radius=min_radius, max_radius=max_radius)
+        except Exception as node_error:
+            import streamlit as st
+            st.error(f"⚠️ Node detection error (server may be overloaded). Attempting recovery... Error: {str(node_error)}")
+            # Retry without OCR if OCR was enabled
+            if use_ocr and not ocr_failed:
+                try:
+                    detector = ImprovedGraphDetector(image, use_ocr=False)
+                    nodes = detector.detect_nodes(min_radius=min_radius, max_radius=max_radius)
+                    ocr_failed = True
+                    st.info("ℹ️ Recovered by disabling OCR. Please try again with OCR disabled if needed.")
+                except:
+                    return None, f"Node detection failed. Please try adjusting parameters or refresh the page. Error: {str(node_error)}"
+            else:
+                return None, f"Node detection failed. Please try adjusting parameters. Error: {str(node_error)}"
+        
+        # Detect edges with error recovery
+        edges = []
+        try:
+            edges = detector.detect_edges(detect_arrows=detect_arrows, edge_min_pixels=edge_min_pixels, node_proximity=node_proximity)
+        except Exception as edge_error:
+            import streamlit as st
+            st.error(f"⚠️ Edge detection error (server may be overloaded). Attempting recovery... Error: {str(edge_error)}")
+            # If we have nodes but edge detection failed, return partial results
+            if nodes:
+                edges = []  # Continue with empty edges for manual editing
+                st.warning("⚠️ Edge detection failed, but nodes were detected. You can manually add edges.")
+            else:
+                return None, f"Edge detection failed. Please try adjusting parameters. Error: {str(edge_error)}"
         
         # Store detection results in session state for editing
         import streamlit as st
@@ -159,16 +209,28 @@ def model_image_to_data(uploaded_image, min_radius=20, max_radius=100, detect_ar
             
             labels_info = f", {len(node_labels)} with labels" if node_labels else ""
             weights_info = f", {len(edge_weights)} with weights" if edge_weights else ""
+            ocr_note = " (OCR disabled due to error)" if ocr_failed else ""
             
-            return g, f"Detected {len(nodes)} nodes{labels_info} and {len(edges)} edges{weights_info}"
+            return g, f"Detected {len(nodes)} nodes{labels_info} and {len(edges)} edges{weights_info}{ocr_note}"
         elif nodes:
-            return None, f"Detected {len(nodes)} nodes but no edges found. Try adjusting Edge Sensitivity."
+            ocr_note = " (OCR disabled due to error)" if ocr_failed else ""
+            return None, f"Detected {len(nodes)} nodes but no edges found. Try adjusting Edge Sensitivity.{ocr_note}"
         else:
             return None, "Could not detect graph structure. Try adjusting Min/Max Node Radius."
             
     except Exception as e:
         import traceback
-        return None, f"Image processing error: {str(e)}\n{traceback.format_exc()}"
+        import streamlit as st
+        error_msg = str(e)
+        # Check for common server crash indicators
+        if "memory" in error_msg.lower() or "cuda" in error_msg.lower() or "gpu" in error_msg.lower():
+            st.error("⚠️ Server may have crashed due to resource limits. The app will attempt to recover automatically. Please wait a moment and try again.")
+            # Attempt automatic recovery by rerunning
+            try:
+                st.rerun()
+            except:
+                pass
+        return None, f"Image processing error: {error_msg}. Please try again or refresh the page."
 
 def render_graph(graph_obj):
     """Standard visualization using Matplotlib from Graph object"""
@@ -306,8 +368,8 @@ def main_generator_ui():
             val_img = None
             
             # Graph detection options (shown when image is selected)
-            use_ocr_gen = True
-            is_weighted_gen = True
+            use_ocr_gen = False
+            is_weighted_gen = False
             is_directed_gen = False
             preset = "Hand-drawn"
             min_radius_gen = 20
@@ -332,9 +394,12 @@ def main_generator_ui():
                     st.markdown("**Graph Options:**")
                     col_opt1, col_opt2, col_opt3 = st.columns(3)
                     with col_opt1:
-                        use_ocr_gen = st.checkbox("Use OCR", value=True, key="gen_ocr", help="Detect node labels and edge weights")
+                        use_ocr_gen = st.checkbox("Use OCR", value=False, key="gen_ocr", help="Detect node labels and edge weights")
+                        # Show warning if OCR is enabled
+                        if use_ocr_gen:
+                            st.warning("⚠️ **Server Warning:** This app runs on a free server. If two users run OCR simultaneously, the server may crash. Please use OCR one at a time.")
                     with col_opt2:
-                        is_weighted_gen = st.checkbox("Weighted", value=True, key="gen_weighted", help="Graph has edge weights")
+                        is_weighted_gen = st.checkbox("Weighted", value=False, key="gen_weighted", help="Graph has edge weights")
                     with col_opt3:
                         is_directed_gen = st.checkbox("Directed", value=False, key="gen_directed", help="Graph has directed edges")
                     
@@ -371,6 +436,33 @@ def main_generator_ui():
                     
                     edge_min_pixels_gen = 11 - edge_sensitivity_gen  # Invert
 
+            # Track current image to detect changes
+            current_image_key = None
+            if val_img:
+                # Create a unique key based on image content to detect when image changes
+                import hashlib
+                if hasattr(val_img, 'read'):
+                    val_img.seek(0)
+                    image_bytes = val_img.read()
+                    current_image_key = hashlib.md5(image_bytes).hexdigest()
+                    val_img.seek(0)  # Reset for later use
+                elif hasattr(val_img, 'name'):
+                    current_image_key = val_img.name
+            
+            # Clear old results if image changed
+            if 'last_image_key' in st.session_state and current_image_key:
+                if st.session_state['last_image_key'] != current_image_key:
+                    # Image changed - clear old results
+                    st.session_state['gen_results'] = None
+                    st.session_state['gen_status'] = ""
+                    st.session_state['gen_mode'] = ""
+                    if 'last_detection' in st.session_state:
+                        del st.session_state['last_detection']
+            
+            # Store current image key
+            if current_image_key:
+                st.session_state['last_image_key'] = current_image_key
+            
             # Action Buttons
             st.markdown("###")
             b_col1, b_col2 = st.columns([1, 2])
@@ -384,6 +476,8 @@ def main_generator_ui():
                         del st.session_state['last_detection']
                     if 'generated_graph' in st.session_state:
                         del st.session_state['generated_graph']
+                    if 'last_image_key' in st.session_state:
+                        del st.session_state['last_image_key']
                     st.rerun()
             with b_col2:
                 run_btn = st.button("Generate", type="primary")
@@ -394,45 +488,76 @@ def main_generator_ui():
                 status_msg = ""
                 mode_msg = ""
 
-                # PRIORITY 1: Description -> Image & Title
-                if use_desc and not use_img and val_desc:
-                    mode_msg = "Mode: Description → Image & Title"
-                    results_graph, err = parse_description_to_graph(val_desc)
-                    if err:
-                        status_msg = f"Error: {err}"
-                    else:
-                        status_msg = "Graph parsed successfully from set notation."
+                try:
+                    # PRIORITY 1: Description -> Image & Title
+                    if use_desc and not use_img and val_desc:
+                        mode_msg = "Mode: Description → Image & Title"
+                        results_graph, err = parse_description_to_graph(val_desc)
+                        if err:
+                            status_msg = f"Error: {err}"
+                        else:
+                            status_msg = "Graph parsed successfully from set notation."
 
-                # PRIORITY 2: Image -> Description & Title
-                elif use_img and val_img:
-                    mode_msg = f"Mode: Image → Description & Title ({'Weighted' if is_weighted_gen else 'Unweighted'}, {'Directed' if is_directed_gen else 'Undirected'}, OCR: {'On' if use_ocr_gen else 'Off'}, Preset: {preset})"
+                    # PRIORITY 2: Image -> Description & Title
+                    elif use_img and val_img:
+                        mode_msg = f"Mode: Image → Description & Title ({'Weighted' if is_weighted_gen else 'Unweighted'}, {'Directed' if is_directed_gen else 'Undirected'}, OCR: {'On' if use_ocr_gen else 'Off'}, Preset: {preset})"
+                        
+                        # Use detection parameters set in left column with error recovery
+                        try:
+                            results_graph, note = model_image_to_data(
+                                val_img, 
+                                min_radius=min_radius_gen,
+                                max_radius=max_radius_gen,
+                                detect_arrows=is_directed_gen, 
+                                use_ocr=use_ocr_gen,
+                                edge_min_pixels=edge_min_pixels_gen,
+                                node_proximity=node_proximity_gen
+                            )
+                            status_msg = note
+                        except Exception as detection_error:
+                            # Automatic recovery: retry without OCR if OCR was enabled
+                            if use_ocr_gen:
+                                st.warning("⚠️ Detection failed with OCR. Retrying without OCR...")
+                                try:
+                                    results_graph, note = model_image_to_data(
+                                        val_img, 
+                                        min_radius=min_radius_gen,
+                                        max_radius=max_radius_gen,
+                                        detect_arrows=is_directed_gen, 
+                                        use_ocr=False,  # Disable OCR on retry
+                                        edge_min_pixels=edge_min_pixels_gen,
+                                        node_proximity=node_proximity_gen
+                                    )
+                                    status_msg = f"{note} (OCR was disabled due to error)"
+                                except Exception as retry_error:
+                                    status_msg = f"Detection failed even without OCR. Please refresh the page and try again. Error: {str(retry_error)}"
+                            else:
+                                status_msg = f"Detection failed. Please try again or refresh the page. Error: {str(detection_error)}"
+
+                    # PRIORITY 3: Title -> Image & Description
+                    elif use_title and val_title:
+                        mode_msg = f"Mode: Title '{val_title}' → Graph"
+                        results_graph, note = model_title_to_graph(val_title)
+                        status_msg = note
                     
-                    # Use detection parameters set in left column
-                    results_graph, note = model_image_to_data(
-                        val_img, 
-                        min_radius=min_radius_gen,
-                        max_radius=max_radius_gen,
-                        detect_arrows=is_directed_gen, 
-                        use_ocr=use_ocr_gen,
-                        edge_min_pixels=edge_min_pixels_gen,
-                        node_proximity=node_proximity_gen
-                    )
-                    status_msg = note
-
-                # PRIORITY 3: Title -> Image & Description
-                elif use_title and val_title:
-                    mode_msg = f"Mode: Title '{val_title}' → Graph"
-                    results_graph, note = model_title_to_graph(val_title)
-                    status_msg = note
-                
-                # Store results in session state for persistence
-                st.session_state['gen_results'] = results_graph
-                st.session_state['gen_status'] = status_msg
-                st.session_state['gen_mode'] = mode_msg
-                
-                # Save for isomorphism checking
-                if results_graph and results_graph.description:
-                    st.session_state['generated_graph'] = results_graph.description
+                    # Store results in session state for persistence
+                    st.session_state['gen_results'] = results_graph
+                    st.session_state['gen_status'] = status_msg
+                    st.session_state['gen_mode'] = mode_msg
+                    
+                    # Save for isomorphism checking
+                    if results_graph and results_graph.description:
+                        st.session_state['generated_graph'] = results_graph.description
+                        
+                except Exception as general_error:
+                    # Catch-all error handler for automatic recovery
+                    error_msg = str(general_error)
+                    st.error(f"⚠️ An error occurred: {error_msg}. Attempting automatic recovery...")
+                    # Store error in session state
+                    st.session_state['gen_status'] = f"Error: {error_msg}. Please refresh the page if the issue persists."
+                    # Attempt to continue with partial results if available
+                    if 'gen_results' in st.session_state and st.session_state['gen_results']:
+                        st.info("ℹ️ Previous results are still available. You can continue working with them.")
 
     # --- RIGHT COLUMN: OUTPUT ---
     with col_output:
@@ -561,7 +686,10 @@ def main_generator_ui():
                     v_str = "V = {" + ", ".join(str(n) for n in nodes_sorted) + "}"
                     e_str = "E = {" + ", ".join(edges_for_display) + "}"
                     desc_text = f"{v_str}\n{e_str}"
-                    st.text_area("Generated Description", value=desc_text, height=100, key="final_desc")
+                    
+                    # Create unique key based on graph content to force update when graph changes
+                    graph_hash = hash(str(results_graph.description))
+                    st.text_area("Generated Description", value=desc_text, height=100, key=f"final_desc_{graph_hash}")
 
                 # 3. Generate Image
                 fig = render_graph(results_graph)
@@ -594,10 +722,13 @@ def realtime_detection_ui():
         st.markdown("**Graph Type:**")
         col_opt1, col_opt2 = st.columns(2)
         with col_opt1:
-            use_ocr = st.checkbox("Use OCR", value=True, key="rt_ocr",
+            use_ocr = st.checkbox("Use OCR", value=False, key="rt_ocr",
                                  help="Detect node labels and edge weights")
+            # Show warning if OCR is enabled
+            if use_ocr:
+                st.warning("⚠️ **Server Warning:** This app runs on a free server. If two users run OCR simultaneously, the server may crash. Please use OCR one at a time.")
         with col_opt2:
-            is_weighted_rt = st.checkbox("Weighted", value=True, key="rt_weighted",
+            is_weighted_rt = st.checkbox("Weighted", value=False, key="rt_weighted",
                                         help="Graph has edge weights")
         
         is_directed_rt = st.checkbox("Directed Graph", value=False, key="rt_directed",
@@ -661,16 +792,57 @@ def realtime_detection_ui():
                 
                 # Real-time detection (runs automatically when new photo taken or button pressed)
                 with st.spinner("Detecting graph..."):
-                    detector = ImprovedGraphDetector(image, use_ocr=use_ocr)
-                    nodes = detector.detect_nodes(min_radius=min_radius, max_radius=max_radius)
+                    detector = None
+                    nodes = []
+                    edges = []
+                    ocr_failed = False
                     
+                    # Initialize detector with error recovery
+                    try:
+                        detector = ImprovedGraphDetector(image, use_ocr=use_ocr)
+                    except Exception as init_error:
+                        if use_ocr:
+                            st.warning(f"⚠️ OCR initialization failed (server may be overloaded). Retrying without OCR...")
+                            try:
+                                detector = ImprovedGraphDetector(image, use_ocr=False)
+                                ocr_failed = True
+                            except Exception as retry_error:
+                                st.error(f"❌ Detection failed even without OCR. Please refresh the page. Error: {str(retry_error)}")
+                                return
+                        else:
+                            st.error(f"❌ Detection initialization failed. Please refresh the page. Error: {str(init_error)}")
+                            return
+                    
+                    # Detect nodes with error recovery
+                    try:
+                        nodes = detector.detect_nodes(min_radius=min_radius, max_radius=max_radius)
+                    except Exception as node_error:
+                        st.error(f"⚠️ Node detection error (server may be overloaded). Attempting recovery...")
+                        if use_ocr and not ocr_failed:
+                            try:
+                                detector = ImprovedGraphDetector(image, use_ocr=False)
+                                nodes = detector.detect_nodes(min_radius=min_radius, max_radius=max_radius)
+                                ocr_failed = True
+                                st.info("ℹ️ Recovered by disabling OCR.")
+                            except:
+                                st.error(f"❌ Node detection failed. Please try again. Error: {str(node_error)}")
+                                return
+                        else:
+                            st.error(f"❌ Node detection failed. Please try again. Error: {str(node_error)}")
+                            return
+                    
+                    # Detect edges with error recovery
                     if nodes:
-                        edges = detector.detect_edges(
-                            detect_arrows=detect_arrows,
-                            edge_min_pixels=edge_min_pixels,
-                            node_proximity=node_proximity,
-                            debug=False
-                        )
+                        try:
+                            edges = detector.detect_edges(
+                                detect_arrows=detect_arrows,
+                                edge_min_pixels=edge_min_pixels,
+                                node_proximity=node_proximity,
+                                debug=False
+                            )
+                        except Exception as edge_error:
+                            st.warning(f"⚠️ Edge detection error. Continuing with nodes only. Error: {str(edge_error)}")
+                            edges = []  # Continue with empty edges
                     else:
                         edges = []
                     
@@ -908,9 +1080,11 @@ def isomorphism_checker_ui():
                 
                 if g1_img:
                     st.markdown("**Graph Options:**")
-                    g1_ocr = st.checkbox("Use OCR", value=True, key="g1_ocr",
+                    g1_ocr = st.checkbox("Use OCR", value=False, key="g1_ocr",
                                         help="Detect node labels and edge weights")
-                    g1_weighted = st.checkbox("Weighted", value=True, key="g1_weighted",
+                    if g1_ocr:
+                        st.warning("⚠️ **Server Warning:** This app runs on a free server. If two users run OCR simultaneously, the server may crash. Please use OCR one at a time.")
+                    g1_weighted = st.checkbox("Weighted", value=False, key="g1_weighted",
                                             help="Graph has edge weights")
                     g1_directed = st.checkbox("Directed", value=False, key="g1_directed",
                                             help="Graph has directed edges")
@@ -1034,9 +1208,11 @@ def isomorphism_checker_ui():
                 
                 if g2_img:
                     st.markdown("**Graph Options:**")
-                    g2_ocr = st.checkbox("Use OCR", value=True, key="g2_ocr",
+                    g2_ocr = st.checkbox("Use OCR", value=False, key="g2_ocr",
                                         help="Detect node labels and edge weights")
-                    g2_weighted = st.checkbox("Weighted", value=True, key="g2_weighted",
+                    if g2_ocr:
+                        st.warning("⚠️ **Server Warning:** This app runs on a free server. If two users run OCR simultaneously, the server may crash. Please use OCR one at a time.")
+                    g2_weighted = st.checkbox("Weighted", value=False, key="g2_weighted",
                                             help="Graph has edge weights")
                     g2_directed = st.checkbox("Directed", value=False, key="g2_directed",
                                             help="Graph has directed edges")

@@ -117,7 +117,7 @@ class ImprovedGraphDetector:
             raise TypeError(f"Unsupported image type: {type(image)}")
     
     def _scan_entire_image_for_text(self):
-        """Scan the entire image for text at multiple scales and return detected text with positions"""
+        """Scan the entire image for text at optimized scales and return detected text with positions"""
         text_locations = []
         seen_positions = set()
         
@@ -125,22 +125,34 @@ class ImprovedGraphDetector:
             return text_locations
         
         try:
-            # CRITICAL: Try multiple scales - different text is visible at different scales!
-            # This is needed because small hand-drawn text has varying quality
-            for scale in [2, 3, 4, 5]:
+            # OPTIMIZED: Use adaptive scaling - only 2-3 scales based on image size
+            # For small images, use higher scales; for large images, use lower scales
+            img_height, img_width = self.image.shape[:2]
+            img_size = max(img_height, img_width)
+            
+            # Adaptive scale selection based on image size
+            if img_size < 400:
+                scales = [3, 4]  # Small images need more upscaling
+            elif img_size < 800:
+                scales = [2, 3]  # Medium images
+            else:
+                scales = [2]  # Large images - single scale is usually enough
+            
+            # Scan at selected scales
+            for scale in scales:
                 upscaled = cv2.resize(self.image, 
-                                    (self.image.shape[1]*scale, self.image.shape[0]*scale), 
+                                    (img_width * scale, img_height * scale), 
                                     interpolation=cv2.INTER_CUBIC)
                 
-                # Use EasyOCR on upscaled image with minimal thresholds
+                # Use EasyOCR with optimized parameters
                 results = self.ocr_reader.readtext(upscaled, detail=1, 
                                                   paragraph=False,
-                                                  min_size=1,
-                                                  width_ths=0.1,
-                                                  height_ths=0.1)
+                                                  min_size=2,  # Slightly higher for speed
+                                                  width_ths=0.3,  # Less aggressive
+                                                  height_ths=0.3)
                 
                 for bbox, text, conf in results:
-                    if conf > 0.5:  # Decent confidence threshold
+                    if conf > 0.4:  # Slightly lower threshold for better recall
                         # Get center of text bounding box and scale back to original coordinates
                         bbox_array = np.array(bbox)
                         center_x = int(np.mean(bbox_array[:, 0]) / scale)
@@ -151,7 +163,7 @@ class ImprovedGraphDetector:
                         
                         cleaned_text = ''.join(c for c in text if c.isalnum())
                         if cleaned_text and len(cleaned_text) <= 3 and pos_key not in seen_positions:
-                            # Lowercase all letters for consistency (OCR may detect 'C' as uppercase)
+                            # Lowercase all letters for consistency
                             cleaned_text = cleaned_text.lower()
                             
                             text_locations.append({
@@ -161,7 +173,21 @@ class ImprovedGraphDetector:
                                 'scale': scale
                             })
                             seen_positions.add(pos_key)
-        except:
+                            
+                            # Early exit optimization: if we found enough text, stop scanning
+                            # (assuming most graphs have limited labels)
+                            if len(text_locations) >= 20:  # Reasonable limit
+                                break
+                
+                # Early exit if we found text at this scale
+                if text_locations and scale == scales[0]:
+                    # If first scale found text, try one more scale for completeness, then stop
+                    if len(scales) > 1:
+                        continue
+                    else:
+                        break
+        except Exception as e:
+            # Silently fail - OCR is optional
             pass
         
         return text_locations
@@ -246,8 +272,9 @@ class ImprovedGraphDetector:
                             text = text_item['text']
                             break
                 
-                # Fallback to region-based extraction if no text found
-                if not text:
+                # Fallback to region-based extraction only if no text found in full scan
+                # This avoids redundant OCR work
+                if not text and self.use_ocr and self.ocr_reader is not None:
                     text = self._extract_text_simple(node_region)
                 
                 node = {
@@ -320,8 +347,8 @@ class ImprovedGraphDetector:
                                 text = text_item['text']
                                 break
                     
-                    # Fallback to region-based extraction if no text found
-                    if not text:
+                    # Fallback to region-based extraction only if no text found in full scan
+                    if not text and self.use_ocr and self.ocr_reader is not None:
                         text = self._extract_text_simple(node_region)
                     
                     node = {
@@ -336,8 +363,30 @@ class ImprovedGraphDetector:
         
         return self.nodes
     
+    def _get_preprocessed_images(self, gray, for_numbers=False):
+        """Shared preprocessing function - returns only the most effective methods"""
+        preprocessed = []
+        
+        # Only use the 3 most effective preprocessing methods
+        # Method 1: Otsu threshold (most reliable)
+        _, thresh1 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        preprocessed.append(thresh1)
+        
+        # Method 2: Inverted Otsu (for dark text on light background)
+        _, thresh2 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        preprocessed.append(thresh2)
+        
+        # Method 3: Adaptive threshold (good for varying lighting)
+        adaptive_size = min(11, (min(gray.shape) // 3) | 1)
+        if adaptive_size >= 3:
+            thresh3 = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                           cv2.THRESH_BINARY, adaptive_size, 2)
+            preprocessed.append(thresh3)
+        
+        return preprocessed
+    
     def _extract_text_simple(self, region):
-        """Extract text using OCR with aggressive preprocessing"""
+        """Extract text using OCR with optimized preprocessing"""
         try:
             # Check if region is valid
             if region is None or region.size == 0 or len(region.shape) < 2:
@@ -360,83 +409,44 @@ class ImprovedGraphDetector:
                 gray = cv2.resize(gray, (gray.shape[1]*scale, gray.shape[0]*scale), 
                                 interpolation=cv2.INTER_CUBIC)
             
-            # Try multiple preprocessing strategies
-            preprocessing_methods = []
+            # Get preprocessed images (only 3 methods instead of 7)
+            preprocessed_list = self._get_preprocessed_images(gray, for_numbers=False)
             
-            # Method 1: Simple threshold
-            _, thresh1 = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY)
-            preprocessing_methods.append(("simple", thresh1))
-            
-            # Method 2: Otsu threshold
-            _, thresh2 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            preprocessing_methods.append(("otsu", thresh2))
-            
-            # Method 3: Inverted Otsu (for dark text on light background)
-            _, thresh3 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-            preprocessing_methods.append(("inv_otsu", thresh3))
-            
-            # Method 4: Adaptive threshold
-            adaptive_size = min(11, (min(gray.shape) // 3) | 1)
-            if adaptive_size >= 3:
-                thresh4 = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                               cv2.THRESH_BINARY, adaptive_size, 2)
-                preprocessing_methods.append(("adaptive", thresh4))
-            
-            # Method 5: Enhanced contrast
-            enhanced = cv2.equalizeHist(gray)
-            _, thresh5 = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            preprocessing_methods.append(("enhanced", thresh5))
-            
-            # Method 6: Very aggressive dark text extraction
-            _, thresh6 = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
-            preprocessing_methods.append(("dark_text", thresh6))
-            
-            # Method 7: Lower threshold for faint text
-            _, thresh7 = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
-            preprocessing_methods.append(("faint_text", thresh7))
-            
-            # Try EasyOCR with all preprocessing methods
+            # Try EasyOCR with optimized preprocessing (early exit on success)
             if self.ocr_reader is not None:
-                for method_name, preprocessed in preprocessing_methods:
+                for preprocessed in preprocessed_list:
                     try:
-                        # Try with very low threshold to catch everything
                         results = self.ocr_reader.readtext(preprocessed, detail=1, 
                                                           paragraph=False,
-                                                          min_size=3,
-                                                          width_ths=0.5,
-                                                          height_ths=0.5)
+                                                          min_size=2,  # Slightly higher for speed
+                                                          width_ths=0.4,
+                                                          height_ths=0.4)
                         if results:
-                            # Try all results, not just best
-                            for bbox, text, conf in results:
-                                if conf > 0.05:  # Very low confidence threshold
-                                    text = text.strip()
-                                    # Filter to alphanumeric only
-                                    text = ''.join(c for c in text if c.isalnum())
-                                    if text:
-                                        return text[:10]
+                            # Use best result (highest confidence)
+                            best_result = max(results, key=lambda x: x[2])  # x[2] is confidence
+                            text, conf = best_result[1], best_result[2]
+                            
+                            if conf > 0.3:  # Reasonable threshold
+                                text = text.strip()
+                                text = ''.join(c for c in text if c.isalnum())
+                                if text:
+                                    return text[:10]  # Early exit on success
                     except:
                         continue
             
-            # Try Tesseract as fallback with multiple PSM modes
+            # Try Tesseract as fallback (only 2 best PSM modes instead of 5)
             if PYTESSERACT_AVAILABLE:
-                psm_modes = [
-                    ('10', 'Single character'),
-                    ('8', 'Single word'),
-                    ('7', 'Single line'),
-                    ('6', 'Uniform block'),
-                    ('13', 'Raw line')
-                ]
+                psm_modes = ['10', '8']  # Only single character and single word modes
                 
-                for method_name, preprocessed in preprocessing_methods:
-                    for psm, desc in psm_modes:
+                for preprocessed in preprocessed_list:
+                    for psm in psm_modes:
                         try:
                             config = f'--psm {psm} --oem 3 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
                             text = pytesseract.image_to_string(preprocessed, config=config).strip()
                             
-                            # Clean up
                             text = ''.join(c for c in text if c.isalnum())
                             if text:
-                                return text[:10]
+                                return text[:10]  # Early exit on success
                         except:
                             continue
             
@@ -445,7 +455,7 @@ class ImprovedGraphDetector:
             return ""
     
     def _extract_edge_weight(self, edge_region):
-        """Extract weight/label from edge region using OCR with aggressive preprocessing"""
+        """Extract weight/label from edge region using OCR with optimized preprocessing"""
         try:
             if edge_region is None or edge_region.size == 0:
                 return None
@@ -462,52 +472,41 @@ class ImprovedGraphDetector:
                 gray = cv2.resize(gray, (gray.shape[1]*scale, gray.shape[0]*scale), 
                                 interpolation=cv2.INTER_CUBIC)
             
-            # Multiple preprocessing attempts
-            preprocessing_methods = []
+            # Use shared preprocessing (only 3 methods)
+            preprocessed_list = self._get_preprocessed_images(gray, for_numbers=True)
             
-            _, thresh1 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            preprocessing_methods.append(("otsu", thresh1))
-            
-            _, thresh2 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-            preprocessing_methods.append(("inv_otsu", thresh2))
-            
-            enhanced = cv2.equalizeHist(gray)
-            _, thresh3 = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            preprocessing_methods.append(("enhanced", thresh3))
-            
-            _, thresh4 = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
-            preprocessing_methods.append(("dark_text", thresh4))
-            
-            # Try EasyOCR with multiple preprocessing
+            # Try EasyOCR with optimized preprocessing (early exit on success)
             if self.ocr_reader is not None:
-                for method_name, preprocessed in preprocessing_methods:
+                for preprocessed in preprocessed_list:
                     try:
                         results = self.ocr_reader.readtext(preprocessed, detail=1, 
                                                           allowlist='0123456789.',
                                                           paragraph=False,
-                                                          min_size=3,
-                                                          width_ths=0.5,
-                                                          height_ths=0.5)
+                                                          min_size=2,
+                                                          width_ths=0.4,
+                                                          height_ths=0.4)
                         if results:
-                            # Try all results
-                            for bbox, text, conf in results:
-                                if conf > 0.05:
-                                    text = text.strip()
-                                    # Try to parse as number
-                                    try:
-                                        weight = float(text)
-                                        return weight
-                                    except:
-                                        # Return as string if not numeric
-                                        if text:
-                                            return text
+                            # Use best result (highest confidence)
+                            best_result = max(results, key=lambda x: x[2])
+                            text, conf = best_result[1], best_result[2]
+                            
+                            if conf > 0.3:
+                                text = text.strip()
+                                try:
+                                    weight = float(text)
+                                    return weight  # Early exit on success
+                                except:
+                                    if text:
+                                        return text
                     except:
                         continue
             
-            # Try Tesseract with multiple modes
+            # Try Tesseract as fallback (only 2 best PSM modes)
             if PYTESSERACT_AVAILABLE:
-                for method_name, preprocessed in preprocessing_methods:
-                    for psm in ['10', '7', '8', '6', '13']:
+                psm_modes = ['10', '8']  # Only single character and single word
+                
+                for preprocessed in preprocessed_list:
+                    for psm in psm_modes:
                         try:
                             config = f'--psm {psm} --oem 3 -c tessedit_char_whitelist=0123456789.'
                             text = pytesseract.image_to_string(preprocessed, config=config).strip()
@@ -515,7 +514,7 @@ class ImprovedGraphDetector:
                             if text:
                                 try:
                                     weight = float(text)
-                                    return weight
+                                    return weight  # Early exit on success
                                 except:
                                     if text:
                                         return text
