@@ -7,9 +7,10 @@ numpy>=1.24.0
 scipy>=1.10.0
 Pillow>=10.0.0
 
-# OCR for node labels and edge weights
-easyocr>=1.7.0  # Recommended - better for single characters
-# Note: EasyOCR will download models on first run (~500MB), which may take time on Streamlit Cloud
+# Optional: For OCR (node labels and edge weights)
+# Choose ONE of these:
+# easyocr>=1.7.0  # Recommended - better for single characters
+# pytesseract>=0.3.10  # Alternative - requires Tesseract binary installation
 
 # Optional: For true real-time detection in Streamlit
 # streamlit-webrtc>=0.47.0
